@@ -1,0 +1,1 @@
+{"status": "done", "rows": [{"algo": "mfwoa_multitask", "thresholds": "23,84,127,144,167,198,215", "fe": 6.628063656172711, "time": 1.9287, "psnr": 25.729632596616074, "ssim": 0.7230140193729859, "dice": 0.36063183779200914}], "exports": [{"algo": "mfwoa_multitask", "seg_fname": "seg_mfwoa_multitask.png"}]}

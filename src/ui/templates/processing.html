@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Processing...</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; 
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    
+    .container { 
+      background: white; 
+      border-radius: 12px; 
+      padding: 3rem 2rem; 
+      max-width: 500px;
+      width: 100%;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      text-align: center;
+    }
+    
+    h1 { 
+      font-size: 1.8rem; 
+      color: #2c3e50; 
+      margin-bottom: 0.5rem;
+      font-weight: 700;
+    }
+    
+    .job-id {
+      color: #666;
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      font-family: monospace;
+      word-break: break-all;
+    }
+    
+    /* Spinner Animation */
+    .spinner-container {
+      margin: 2rem auto;
+      position: relative;
+      width: 80px;
+      height: 80px;
+    }
+    
+    .spinner {
+      width: 80px;
+      height: 80px;
+      border: 6px solid #e0e0e0;
+      border-top-color: #667eea;
+      border-right-color: #764ba2;
+      border-radius: 50%;
+      animation: spin 1.2s linear infinite;
+      transition: all 0.3s ease-in-out;
+    }
+    
+    .spinner.done {
+      animation: none;
+      border-color: #27ae60;
+      border-top-color: #27ae60;
+    }
+    
+    @keyframes spin { 
+      to { transform: rotate(360deg); } 
+    }
+    
+    /* Checkmark Animation */
+    .checkmark-icon {
+      width: 80px;
+      height: 80px;
+      display: none;
+      margin: 0 auto;
+    }
+    
+    .checkmark-circle {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: #27ae60;
+      animation: scaleIn 0.3s ease-in-out;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .checkmark {
+      width: 50px;
+      height: 50px;
+      position: relative;
+    }
+    
+    .checkmark::after {
+      content: '';
+      position: absolute;
+      width: 15px;
+      height: 25px;
+      border: solid white;
+      border-width: 0 3px 3px 0;
+      transform: rotate(45deg) translate(-8px, -8px);
+      animation: checkmarkAnimate 0.4s ease-in-out 0.2s backwards;
+    }
+    
+    @keyframes checkmarkAnimate {
+      0% { transform: rotate(45deg) translate(-15px, -15px) scaleX(0); opacity: 0; }
+      50% { opacity: 1; }
+      100% { transform: rotate(45deg) translate(-8px, -8px) scaleX(1); opacity: 1; }
+    }
+    
+    @keyframes scaleIn {
+      0% { transform: scale(0); }
+      50% { transform: scale(1.1); }
+      100% { transform: scale(1); }
+    }
+    
+    /* Status Messages */
+    .status-box {
+      margin: 2rem 0;
+      padding: 1rem;
+      background: #f0f7ff;
+      border-left: 4px solid #667eea;
+      border-radius: 6px;
+      text-align: left;
+    }
+    
+    .status-label {
+      font-size: 0.85rem;
+      color: #666;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 0.3rem;
+    }
+    
+    #status {
+      font-size: 1.1rem;
+      color: #2c3e50;
+      font-weight: 500;
+      word-wrap: break-word;
+    }
+    
+    #status.success {
+      color: #27ae60;
+      font-weight: 600;
+    }
+    
+    #status.error {
+      color: #e74c3c;
+      border-left-color: #e74c3c;
+      background: #fef5f5;
+    }
+    
+    /* Progress Bar */
+    .progress-container {
+      margin: 1.5rem 0;
+      background: #e0e0e0;
+      height: 6px;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+      width: 30%;
+      animation: progressPulse 1.5s ease-in-out infinite;
+      border-radius: 3px;
+    }
+    
+    .progress-bar.complete {
+      width: 100%;
+      animation: none;
+    }
+    
+    @keyframes progressPulse {
+      0% { width: 30%; }
+      50% { width: 60%; }
+      100% { width: 30%; }
+    }
+    
+    /* Button */
+    .button {
+      display: inline-block;
+      margin-top: 1.5rem;
+      padding: 0.75rem 1.5rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      text-decoration: none;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 1rem;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+    
+    .button:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(102, 126, 234, 0.6);
+    }
+    
+    .button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    
+    .button:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    
+    /* Footer */
+    .footer-note {
+      font-size: 0.8rem;
+      color: #999;
+      margin-top: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>⚙️ Processing Your Job</h1>
+    
+    <div class="job-id">
+      Job ID: {{ job_id }}
+    </div>
+    
+    <!-- Spinner / Checkmark -->
+    <div class="spinner-container">
+      <div class="spinner" id="spinner"></div>
+      <div class="checkmark-icon" id="checkmark-icon">
+        <div class="checkmark-circle">
+          <div class="checkmark"></div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Progress Bar -->
+    <div class="progress-container">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    
+    <!-- Status Box -->
+    <div class="status-box">
+      <div class="status-label">Status</div>
+      <div id="status">⏳ Starting...</div>
+    </div>
+    
+    <!-- Result Link -->
+    <div id="result-container" style="display:none;">
+      <a id="result-link" class="button" href="#" onclick="window.location.href=this.href; return false;">
+        ✓ View Results
+      </a>
+      <div class="footer-note">Click button to view detailed results and download images</div>
+    </div>
+    
+    <!-- Back Button -->
+    <a href="{{ url_for('index') }}" class="button" style="background: #95a5a6; box-shadow: 0 4px 12px rgba(149,165,166,0.4); margin-left: 0.5rem;" id="back-btn" style="display:none;">← Back</a>
+  </div>
+
+  <script>
+    const jobId = "{{ job_id }}";
+    const statusEl = document.getElementById('status');
+    const resultLink = document.getElementById('result-link');
+    const resultContainer = document.getElementById('result-container');
+    const spinner = document.getElementById('spinner');
+    const checkmarkIcon = document.getElementById('checkmark-icon');
+    const progressBar = document.getElementById('progress-bar');
+    const backBtn = document.getElementById('back-btn');
+    
+    let pollCount = 0;
+    const maxPolls = 240; // 12 minutes max (240 * 3s)
+    
+    const statusMessages = {
+      pending: '⏳ Waiting to start...',
+      running: '🔄 Processing algorithms...',
+      done: '✅ Completed successfully!',
+      error: '❌ An error occurred'
+    };
+
+    async function checkStatus() {
+      pollCount++;
+      
+      try {
+        const res = await fetch(`/job_status/${jobId}`);
+        const data = await res.json();
+        const status = data.status || 'unknown';
+        
+        // Update status message
+        statusEl.textContent = statusMessages[status] || `Status: ${status}`;
+        
+        // Update progress
+        const progress = Math.min(90, 10 + (pollCount * 0.3));
+        progressBar.style.width = progress + '%';
+        
+        if (status === 'done') {
+          // Success! Show checkmark
+          spinner.style.display = 'none';
+          checkmarkIcon.style.display = 'block';
+          progressBar.classList.add('complete');
+          progressBar.style.width = '100%';
+          statusEl.textContent = '✅ Completed successfully!';
+          statusEl.classList.add('success');
+          
+          resultLink.href = `/job_result/${jobId}`;
+          resultContainer.style.display = 'block';
+          backBtn.style.display = 'inline-block';
+          return;
+        }
+        
+        if (status === 'error') {
+          // Error! Show X and error message
+          spinner.style.display = 'none';
+          statusEl.textContent = '❌ Error: ' + (data.error || 'processing error');
+          statusEl.classList.add('error');
+          resultContainer.querySelector('a').textContent = '📋 View Error Details';
+          resultLink.href = `/job_result/${jobId}`;
+          resultContainer.style.display = 'block';
+          backBtn.style.display = 'inline-block';
+          return;
+        }
+        
+        // Still processing
+        if (pollCount > maxPolls) {
+          statusEl.textContent = '⚠️ Processing taking longer than expected...';
+          statusEl.classList.add('error');
+        }
+        
+      } catch (err) {
+        statusEl.textContent = '⚠️ Unable to reach server';
+        statusEl.classList.add('error');
+      }
+      
+      // Keep polling
+      setTimeout(checkStatus, 3000);
+    }
+
+    // Start polling
+    checkStatus();
+  </script>
+</body>
+</html>

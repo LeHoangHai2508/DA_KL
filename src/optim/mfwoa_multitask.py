@@ -13,22 +13,34 @@ import numpy as np
 from typing import List, Sequence, Tuple
 
 from src.metrics.fuzzy_entropy import compute_fuzzy_entropy
+from src.seg.utils import enforce_threshold_constraints
 
 EPS = 1e-12
 
 
-def _ensure_sorted_unique(vec: np.ndarray) -> np.ndarray:
-    vals = np.clip(vec, 0.0, 255.0)
-    vals = np.sort(vals)
-    for i in range(1, len(vals)):
-        if vals[i] <= vals[i - 1]:
-            vals[i] = vals[i - 1] + 1e-3
-    return vals
-
-
 def continuous_to_thresholds(pos: np.ndarray, K: int) -> List[int]:
-    arr = _ensure_sorted_unique(pos[:K])
-    return [int(round(x)) for x in arr]
+    """Convert continuous position to discrete thresholds using standard constraint enforcement.
+    
+    Hàm chuyển đổi vị trí liên tục (từ optimizer) thành danh sách ngưỡng rời rạc (int).
+    Dùng enforce_threshold_constraints để đảm bảo consistency với other optimizers.
+    
+    Args:
+        pos: Continuous position vector (numpy array)
+        K: Number of thresholds (số ngưỡng cần lấy từ vị trí)
+    
+    Returns:
+        List of integer thresholds (đã constraint, sorted, enforced gap)
+    """
+    # Lấy K phần tử đầu từ vị trí
+    arr = pos[:K]
+    # Sử dụng enforce_threshold_constraints từ seg/utils để đảm bảo:
+    # - Nằm trong [1, 254]
+    # - Sắp xếp tăng dần
+    # - Khoảng cách tối thiểu giữa các ngưỡng
+    # - Không trùng
+    constrained = enforce_threshold_constraints(np.round(arr).astype(np.int32))
+    # Chuyển thành list int
+    return [int(x) for x in constrained]
 
 
 def mfwoa_multitask(
@@ -41,14 +53,41 @@ def mfwoa_multitask(
     pop_per_task: int = None,
     elitism: int = 3,
     rmp_schedule: Sequence[tuple] = None,
+    membership: str = "triangular",
+    lambda_penalty: float = 1.0,
+    alpha_area: float = 0.10,
+    beta_membership: float = 0.10,
+    gamma_spacing: float = 0.20,
 ) -> Tuple[List[List[int]], List[float], dict]:
     """Run simplified MFWOA for multiple tasks simultaneously.
+    
+    ===== MULTITASK MFWOA: Knowledge Transfer + Adaptive RMP =====
+    
+    Thuật toán:
+    1. Khởi tạo quần thể gộp (pop_size cá thể) được chia cho T tasks
+    2. Mỗi cá thể được gán skill_factor ∈ {0..T-1} (assigned task)
+    3. Mỗi iteration: cập nhật cá thể dựa vào WOA mechanics + knowledge transfer (cross-task)
+    4. rmp (cross-task rate) được adjust dựa trên thành công
+    5. Trả về best_thresholds cho mỗi task
 
     Args:
         hists: sequence of histograms (one per task). For same image multiple Ks, pass same hist repeated.
         Ks: sequence of ints number of thresholds per task.
+        pop_size: Total population size (chia cho T tasks)
+        iters: Number of iterations
+        rng: Random number generator (seed cho reproducibility)
+        rmp_init: Initial cross-task rate (0.3 = 30% cross-task updates)
+        pop_per_task: Nếu set, tính pop_size = pop_per_task * T (override pop_size param)
+        elitism: Số elite individuals mỗi task được preserve
+        rmp_schedule: Optional schedule [(start_frac, end_frac, rmp_value), ...]
+        membership: Membership function type cho compute_fuzzy_entropy (triangular/gaussian/s)
+        lambda_penalty: Weighting factor cho penalizer
+        alpha_area: Weight cho P_A penalty (cân bằng kích thước lớp)
+        beta_membership: Weight cho P_μ penalty (tránh concentrated membership)
+        gamma_spacing: Weight cho P_spacing penalty (enforce even distribution)
+    
     Returns:
-        (best_thresholds_per_task, best_scores_per_task)
+        (best_thresholds_per_task, best_scores_per_task, diagnostics)
     """
     if rng is None:
         rng = np.random.default_rng(123)
@@ -57,10 +96,28 @@ def mfwoa_multitask(
     # allow specifying population per task; if provided, scale total pop
     if pop_per_task is not None:
         pop_size = int(pop_per_task) * T
-    # objectives per task
+    
+    # ===== OBJECTIVES PER TASK: Sử dụng same penalties như app.py =====
+    # compute_fuzzy_entropy(hist, thresholds, membership, for_minimization=False,
+    #                       lambda_penalty, alpha_area, beta_membership, gamma_spacing)
     def make_obj(hist, K):
-        return lambda pos: compute_fuzzy_entropy(hist, continuous_to_thresholds(pos, K))
-
+        def obj_task(pos):
+            """Objective function: maximize fuzzy entropy with penalties"""
+            thr = continuous_to_thresholds(pos, K)
+            # Tính FE với penalties (same formula như app.py)
+            # for_minimization=False: sẽ trả về FE (cao hơn tốt hơn)
+            fe_val = compute_fuzzy_entropy(
+                hist, thr, 
+                membership=membership,
+                for_minimization=False,
+                lambda_penalty=lambda_penalty,
+                alpha_area=alpha_area,
+                beta_membership=beta_membership,
+                gamma_spacing=gamma_spacing
+            )
+            return float(fe_val)
+        return obj_task
+    
     objectives = [make_obj(h, K) for h, K in zip(hists, Ks)]
 
     # initialize population and skill factors
@@ -80,6 +137,12 @@ def mfwoa_multitask(
         # assign indices round-robin to ensure at least one per task
         for i in range(pop_size):
             skill_factors[i] = i % T
+        # ===== RECALCULATE FITNESS AFTER REALLOCATION =====
+        # Khi thay đổi skill_factors, PHẢI tính lại fitness cho từng cá thể theo assigned task
+        # Không làm bước này, cá thể sẽ có fitness từ task cũ (sai!)
+        for i in range(pop_size):
+            sf = int(skill_factors[i])
+            fitness[i] = objectives[sf](pop[i])
 
     for t in range(T):
         mask = (skill_factors == t)
@@ -152,7 +215,10 @@ def mfwoa_multitask(
                     l = rng.uniform(-1, 1)
                     distance = abs(leader - pop[i])
                     new_pos = distance * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
-            new_pos = _ensure_sorted_unique(new_pos)
+            
+            # ===== CONSTRAINT: Sử dụng enforce_threshold_constraints =====
+            # Đảm bảo new_pos tuân theo ràng buộc: sort, clip [1,254], gap enforcement
+            new_pos = enforce_threshold_constraints(np.round(new_pos).astype(np.int32)).astype(np.float32)
             new_fit = objectives[sf](new_pos)
             total_xt += 1
             nfe += 1

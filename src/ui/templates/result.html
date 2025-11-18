@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Result - Fuzzy Entropy</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .mode-badge { 
+      display: inline-block; 
+      padding: 6px 12px; 
+      border-radius: 20px; 
+      font-weight: 600; 
+      font-size: 0.85rem; 
+      margin-left: 8px;
+    }
+    .mode-single { background: #e8f4f8; color: #0c5460; border: 1px solid #bee5eb; }
+    .mode-multitask { background: #e8f5e9; color: #1b5e20; border: 1px solid #c8e6c9; }
+  </style>
+</head>
+<body>
+  <div class="container py-4">
+    <h1 class="mb-3">
+      Kết quả
+      {% if 'multitask' in info.lower() %}
+        <span class="mode-badge mode-multitask">🔗 Multitask</span>
+      {% else %}
+        <span class="mode-badge mode-single">📊 Single-task</span>
+      {% endif %}
+    </h1>
+
+    <div class="row">
+      <div class="col-md-6">
+        <div class="card mb-3">
+          <div class="card-header">Input image</div>
+          <div class="card-body text-center">
+            <img src="{{ img_preview }}" alt="preview" style="max-width:100%; height:auto;">
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header">Histogram</div>
+          <div class="card-body text-center">
+            <img src="{{ hist_img }}" alt="histogram" style="max-width:100%; height:auto;">
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="card mb-3">
+          <div class="card-header">Metrics</div>
+          <div class="card-body">
+            <p><strong>Mode:</strong> {{ info }}</p>
+            <p><strong>Thresholds:</strong> {{ thresholds }}</p>
+            <p><strong>Membership:</strong> {{ membership }}</p>
+            <p><strong>Fuzzy Entropy (De Luca-Termini):</strong> <code>{{ "%.4f"|format(fe) if fe else "N/A" }}</code></p>
+          </div>
+        </div>
+
+        <a class="btn btn-secondary" href="{{ url_for('index') }}">← Back</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -13,7 +13,9 @@ import numpy as np
 
 from src.metrics.fuzzy_entropy import histogram_from_image
 from src.optim.mfwoa_multitask import mfwoa_multitask
-
+from src.metrics.metrics import dice_coefficient
+from src.seg.utils import read_image, save_image # Giả sử bạn dùng hàm này
+import cv2 # Cần cho việc xử lý ảnh
 
 def run_on_folder(input_dir: Path, Ks: List[int], pop: int, iters: int, outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
