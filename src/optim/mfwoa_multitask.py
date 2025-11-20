@@ -185,6 +185,9 @@ def mfwoa_multitask(
 
     # Track best_score per task from PREVIOUS iteration (for Algorithm 2 RMP update)
     best_score_prev = best_score.copy()
+    
+    # ===== RMP ADAPTATION TRACKING =====
+    stuck_iterations = 0  # Counter for consecutive stuck iterations
 
     # Count individuals per task
     counts = np.bincount(skill_factors, minlength=T)
@@ -199,17 +202,28 @@ def mfwoa_multitask(
         frac = g / max(1, iters)
         a = 2.0 * (1 - g / max(1, iters - 1))
         
-        # ===== ALGORITHM 2: RMP UPDATE (Lines 12-15) =====
-        # Check if ANY task improved since previous iteration
-        # If NO task improved: rmp = rmp + δN(0,1) with δ=0.1
-        # If ANY task improved: rmp stays same
+        # ===== ALGORITHM 2: SMOOTH RMP UPDATE (Lines 12-15) =====
+        # Adaptive RMP based on search progress (smooth decay with boost when stuck)
+        # - Base: exponential decay from rmp_init → 0 (smooth baseline)
+        # - Boost: if NO task improved → increase stuck counter → boost RMP temporarily
+        # Result: RMP changes smoothly, not erratic jumps
+        
         if g > 0:
             task_improved = any(best_score[t] < best_score_prev[t] for t in range(T))
+            
             if not task_improved:
-                # No task improved -> update RMP by Gaussian noise
-                delta = 0.1
-                gaussian_noise = rng.normal(0, 1)  # N(0,1)
-                rmp = float(np.clip(rmp + delta * gaussian_noise, 0.0, 1.0))
+                # No improvement → increment stuck counter (max 5 iterations)
+                stuck_iterations = min(stuck_iterations + 1, 5)
+            else:
+                # Improvement → reset stuck counter (allow exploitation)
+                stuck_iterations = max(stuck_iterations - 1, 0)
+        
+        # Smooth exponential decay: rmp_init → 0 over entire search
+        base_decay = rmp_init * (1.0 - frac)  # Linear decay: 0.3 → 0
+        
+        # Add boost when stuck (smooth increase, capped at 0.5)
+        stuck_boost = 0.1 * stuck_iterations  # +0.1 per stuck iter, max +0.5
+        rmp = float(np.clip(base_decay + stuck_boost, 0.0, 1.0))
         
         # If custom schedule provided, override
         if rmp_schedule is not None:
