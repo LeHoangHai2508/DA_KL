@@ -185,9 +185,6 @@ def mfwoa_multitask(
 
     # Track best_score per task from PREVIOUS iteration (for Algorithm 2 RMP update)
     best_score_prev = best_score.copy()
-    
-    # ===== RMP ADAPTATION TRACKING =====
-    stuck_iterations = 0  # Counter for consecutive stuck iterations
 
     # Count individuals per task
     counts = np.bincount(skill_factors, minlength=T)
@@ -202,28 +199,17 @@ def mfwoa_multitask(
         frac = g / max(1, iters)
         a = 2.0 * (1 - g / max(1, iters - 1))
         
-        # ===== ALGORITHM 2: SMOOTH RMP UPDATE (Lines 12-15) =====
-        # Adaptive RMP based on search progress (smooth decay with boost when stuck)
-        # - Base: exponential decay from rmp_init → 0 (smooth baseline)
-        # - Boost: if NO task improved → increase stuck counter → boost RMP temporarily
-        # Result: RMP changes smoothly, not erratic jumps
-        
+        # ===== ALGORITHM 2: RMP UPDATE (Lines 12-15) =====
+        # Check if ANY task improved since previous iteration
+        # If NO task improved: rmp = rmp + δN(0,1) with δ=0.1
+        # If ANY task improved: rmp stays same
         if g > 0:
             task_improved = any(best_score[t] < best_score_prev[t] for t in range(T))
-            
             if not task_improved:
-                # No improvement → increment stuck counter (max 5 iterations)
-                stuck_iterations = min(stuck_iterations + 1, 5)
-            else:
-                # Improvement → reset stuck counter (allow exploitation)
-                stuck_iterations = max(stuck_iterations - 1, 0)
-        
-        # Smooth exponential decay: rmp_init → 0 over entire search
-        base_decay = rmp_init * (1.0 - frac)  # Linear decay: 0.3 → 0
-        
-        # Add boost when stuck (smooth increase, capped at 0.5)
-        stuck_boost = 0.1 * stuck_iterations  # +0.1 per stuck iter, max +0.5
-        rmp = float(np.clip(base_decay + stuck_boost, 0.0, 1.0))
+                # No task improved -> update RMP by Gaussian noise
+                delta = 0.1
+                gaussian_noise = rng.normal(0, 1)  # N(0,1)
+                rmp = float(np.clip(rmp + delta * gaussian_noise, 0.0, 1.0))
         
         # If custom schedule provided, override
         if rmp_schedule is not None:
@@ -237,6 +223,11 @@ def mfwoa_multitask(
 
         # Prepare next generation container (we will allow elitism preservation)
         next_pop = pop.copy()
+        
+        # ===== PRE-COMPUTE A (Whale coefficient) FOR THIS ITERATION =====
+        # A determines if this is Encircle/Attack (|A| < 1) or Search for prey (|A| ≥ 1)
+        r1_main = rng.random()
+        A_main = 2 * a * r1_main - a  # Global A for this iteration
 
         for i in range(pop_size):
             sf = int(skill_factors[i])
@@ -382,11 +373,21 @@ def mfwoa_multitask(
             new_fit = objectives[sf](new_pos)  # ← Constraints enforced INSIDE objective
             nfe += 1
             
-            # replace in next_pop when improved (minimize: new_fit < fitness[i])
-            if new_fit < fitness[i]:  # ⚠️ CHANGED: < instead of > for MINIMIZATION
+            # ===== WOA PURE STRATEGY: Mandatory move based on |A| value =====
+            # Theo lý thuyết WOA gốc:
+            # - Search for prey (|A| ≥ 1): Cá thể di chuyển bắt buộc (exploration)
+            # - Encircle/Attack (|A| < 1): Cải thiện tham lam (exploitation)
+            should_update = False
+            
+            if abs(A_main) >= 1:  # Search for prey phase -> mandatory update
+                should_update = True
+            elif new_fit < fitness[i]:  # Encircle/attack -> greedy
+                should_update = True
+            
+            if should_update:
                 next_pop[i] = new_pos
                 fitness[i] = new_fit
-                if new_fit < best_score[sf]:  # ⚠️ CHANGED: < instead of > for MINIMIZATION
+                if new_fit < best_score[sf]:  # Update global best if improved
                     best_score[sf] = float(new_fit)
                     best_pos[sf] = new_pos.copy()
 
