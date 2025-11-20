@@ -43,8 +43,11 @@ def pso_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
         particles[i] = thresholds
     
     # ===== KHỞI TẠO VELOCITIES (VẬN TỐC) =====
-    # Vận tốc ban đầu = 0 (particles sẽ bắt đầu tĩnh)
-    velocities = np.zeros_like(particles)
+    # Theo Algorithm 1, Line 4: v0_i ← random vector within [LB, UB]^D
+    # Vận tốc khởi tạo random từ [1, 254]
+    velocities = np.zeros((pop_size, K), dtype=np.float32)
+    for i in range(pop_size):
+        velocities[i] = rng.uniform(1, 254, K)
     
     # ===== PSO PARAMETERS =====
     # w: Inertia weight - điều chỉnh tác động của vận tốc cũ lên vận tốc mới
@@ -59,22 +62,23 @@ def pso_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
     c2 = 2.0
     
     # ===== PERSONAL BEST =====
-    # pbest: lưu position tốt nhất mà mỗi particle đã tìm được
-    # Khởi tạo = position ban đầu (chưa explore)
+    # Theo Algorithm 1, Line 6: p0_besti ← x0_i
+    # pbest khởi tạo = position ban đầu (KHÔNG constraint)
     pbest = particles.copy()
     # pbest_scores: lưu score (fitness) của pbest
-    # Tính fitness cho tất cả particles
-    pbest_scores = np.array([objective(enforce_threshold_constraints(p)) for p in pbest], dtype=object)
+    # Tính fitness cho tất cả particles (dengan constraint khi eval)
+    pbest_scores = np.array([objective(enforce_threshold_constraints(p)) for p in pbest])
     
     # ===== GLOBAL BEST =====
+    # Theo Algorithm 1, Line 8: Apply Eq. (2) to find g0_best
+    # gbest = position của best particle (pbest với minimum fitness)
     # gbest_idx: chỉ số particle có best score toàn swarm
-    # Filter out None scores để tìm best valid score
     valid_scores = [(i, s) for i, s in enumerate(pbest_scores) if s is not None]
     if not valid_scores:
         # Nếu không có valid score, return empty
         return [], None
     gbest_idx = min(valid_scores, key=lambda x: x[1])[0]
-    # gbest: position của best particle
+    # gbest: position của best particle (Eq 2)
     gbest = pbest[gbest_idx].copy()
     # gbest_score: score của best particle
     gbest_score = pbest_scores[gbest_idx]
@@ -104,13 +108,8 @@ def pso_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
         )
         # Tất cả phép toán này là element-wise (vectorized, không vòng lặp)
         
-        # ===== LIMIT VELOCITY MAGNITUDE =====
-        # Giới hạn vận tốc để tránh bước nhảy quá lớn
-        # np.clip(v, -5.0, 5.0): mỗi vận tốc bị clip về [-5, 5]
-        velocities = np.clip(velocities, -5.0, 5.0)
-        
         # ===== CẬP NHẬT POSITION (VỊ TRÍ) =====
-        # Công thức PSO: x_new = x_old + v_new
+        # Công thức PSO: x_new = x_old + v_new (Eq. 4)
         particles = particles + velocities
         
         # ===== ENFORCE CONSTRAINTS TRÊN TỪNG PARTICLE =====
@@ -128,28 +127,29 @@ def pso_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
         scores = np.array([objective(enforce_threshold_constraints(p)) for p in particles], dtype=object)
         
         # ===== CẬP NHẬT PERSONAL BEST =====
-        # Tìm particles nào có score tốt hơn pbest của nó
-        # Handle None values: chỉ so sánh khi cả hai đều valid
+        # Theo Algorithm 1, Line 15-17
+        # if f(x(t)_i) < f(pbest(t-1)_i) then pbest(t)_i = x(t)_i (Eq. 1)
         for i in range(pop_size):
             if scores[i] is not None and pbest_scores[i] is not None:
                 if scores[i] < pbest_scores[i]:
                     pbest[i] = particles[i].copy()
                     pbest_scores[i] = scores[i]
             elif scores[i] is not None and pbest_scores[i] is None:
-                # Nếu pbest cũ là None nhưng score mới valid, update
                 pbest[i] = particles[i].copy()
                 pbest_scores[i] = scores[i]
         
         # ===== CẬP NHẬT GLOBAL BEST =====
-        # Tìm particle có best valid score trong pbest
+        # Theo Algorithm 1, Line 19: Apply Eq. (2) to find g(t)_best
+        # g(t)_best = x* | f(x*) = min_{i,k}(f(x(k)_i))
+        # Tìm best particle trong current pbest scores
         valid_pbest = [(i, s) for i, s in enumerate(pbest_scores) if s is not None]
         if valid_pbest:
             min_idx = min(valid_pbest, key=lambda x: x[1])[0]
             # Nếu best score hiện tại tốt hơn global best
             if gbest_score is None or pbest_scores[min_idx] < gbest_score:
-                # Cập nhật global best
-                gbest = pbest[min_idx].copy()  # Gán new best position
-                gbest_score = pbest_scores[min_idx]  # Gán new best score
+                # Cập nhật global best (Eq. 2)
+                gbest = pbest[min_idx].copy()
+                gbest_score = pbest_scores[min_idx]
     # end iteration loop
     
     # ===== TRẢ VỀ KẾT QUẢ =====
