@@ -120,9 +120,7 @@ def mfwoa_multitask(
             """Objective function: minimize -FE (equivalent to maximizing FE) with penalties
         
             """
-            thr = continuous_to_thresholds(pos, K)  # ← Constraints enforced HERE
-            # Tính FE với penalties (same formula như app.py)
-            # for_minimization=False: sẽ trả về FE (cao hơn tốt hơn)
+            thr = continuous_to_thresholds(pos, K)
             fe_val = compute_fuzzy_entropy(
                 hist, thr, 
                 membership=membership,
@@ -131,7 +129,6 @@ def mfwoa_multitask(
                 alpha_area=alpha_area,
                 beta_membership=beta_membership,
                 gamma_spacing=gamma_spacing,
-                delta_compactness=0.0  # Không dùng compactness, rely on gamma_spacing
             )
             # Negate to convert maximization (FE) to minimization (-FE)
             # This matches WOA's approach: minimize -FE instead of maximize FE
@@ -179,14 +176,15 @@ def mfwoa_multitask(
             best_score[t] = float(fitness[idx])
 
     rmp = float(rmp_init)
-    success_count = 0
-    total_xt = 0
     cross_task_count = 0  # DEBUG: track cross-task transfers
     mutation_count = 0  
 
     # history logging
     history = {t: [] for t in range(T)}
     nfe = 0
+
+    # Track best_score per task from PREVIOUS iteration (for Algorithm 2 RMP update)
+    best_score_prev = best_score.copy()
 
     # Count individuals per task
     counts = np.bincount(skill_factors, minlength=T)
@@ -201,34 +199,26 @@ def mfwoa_multitask(
         frac = g / max(1, iters)
         a = 2.0 * (1 - g / max(1, iters - 1))
         
-        # =====: HIGH-K RMP SCHEDULE =====
-        # For high-dimensional search (K≥8), maintain higher rmp for longer
-        # to preserve exploration capability
+        # ===== ALGORITHM 2: RMP UPDATE (Lines 12-15) =====
+        # Check if ANY task improved since previous iteration
+        # If NO task improved: rmp = rmp + δN(0,1) with δ=0.1
+        # If ANY task improved: rmp stays same
+        if g > 0:
+            task_improved = any(best_score[t] < best_score_prev[t] for t in range(T))
+            if not task_improved:
+                # No task improved -> update RMP by Gaussian noise
+                delta = 0.1
+                gaussian_noise = rng.normal(0, 1)  # N(0,1)
+                rmp = float(np.clip(rmp + delta * gaussian_noise, 0.0, 1.0))
+        
+        # If custom schedule provided, override
         if rmp_schedule is not None:
-            # Use provided schedule
             for (s_frac, e_frac, val) in rmp_schedule:
                 if frac >= s_frac and frac < e_frac:
                     rmp = float(val)
                     break
-        elif maxK >= 8:
-            #  High-K adaptive schedule (SLOWER decay to maintain knowledge transfer)
-            # Maintain rmp≥0.4 for first 80% iterations
-            # Then decay to 0.15 for final 20%
-            if frac < 0.8:
-                # Early phase: sustained knowledge transfer
-                # Linear decay from rmp_init (0.5) to 0.4 over 80% of iterations
-                rmp = max(0.4, rmp_init - frac * 0.125)
-            else:
-                # Late phase: exploitation (very gradual decline)
-                # Decay from 0.4 to 0.15 over final 20%
-                rmp = max(0.15, 0.4 - (frac - 0.8) / 0.2 * 0.25)
-        else:
-            # Low-K: use default adaptive rmp
-            if total_xt > 0 and g % 10 == 0 and g > 0:
-                frac_succ = success_count / (total_xt + EPS)
-                rmp = float(np.clip(0.5 * rmp + 0.5 * frac_succ, 0.05, 0.95))
         
-        # If single-task, we may want to force rmp to zero to avoid transfer noise
+        # If single-task, force rmp to zero
         rmp_local = 0.0 if T == 1 else rmp
 
         # Prepare next generation container (we will allow elitism preservation)
@@ -236,24 +226,109 @@ def mfwoa_multitask(
 
         for i in range(pop_size):
             sf = int(skill_factors[i])
-            p_cross = rng.random()
             
-            # ===== CROSS-TASK KNOWLEDGE TRANSFER =====
-            if p_cross < rmp_local:
-                # cross-task interaction: pick random other task's leader
+            # ===== ALGORITHM 3: KNOWLEDGE TRANSFER =====
+            rand_i1 = rng.random()  # For cross-task decision
+            rand_i2 = rng.random()  # For WOA method selection
+            rand_i3 = rng.random()  # For mutation
+            rand_i4 = rng.random()  # For skill factor change
+            
+            if rand_i1 < rmp_local:  # Inter-task knowledge transfer (Algorithm 3, Step 2-20)
+                # Step 3: Randomly select one other task
                 other_tasks = [t for t in range(T) if t != sf]
                 if other_tasks:
-                    other = rng.choice(other_tasks)
-                    leader = best_pos[other]
-                    # mix leader genes into current
-                    beta = rng.random()
-                    new_pos = pop[i] * (1 - beta) + leader * beta
-                    cross_task_count += 1  # DEBUG: track transfer
+                    other_task = rng.choice(other_tasks)
+                    
+                    # Step 4: Randomly select a learned individual from other task
+                    other_mask = (skill_factors == other_task)
+                    if np.count_nonzero(other_mask) > 0:
+                        other_indices = np.where(other_mask)[0]
+                        j_idx = rng.choice(other_indices)
+                        X_j = pop[j_idx]
+                    else:
+                        X_j = best_pos[other_task]
+                    
+                    # Step 5-18: Choose method (first way or second way)
+                    if rand_i2 < 0.2:  # First way: traditional WOA
+                        leader = best_pos[sf]
+                        r1 = rng.random()
+                        r2 = rng.random()
+                        A = 2 * a * r1 - a
+                        C = 2 * r2
+                        p = rng.random()
+                        
+                        if p < 0.5:
+                            if abs(A) < 1:  # Encircling prey
+                                D1 = abs(C * leader - pop[i])
+                                D_other = abs(C * best_pos[other_task] - X_j)
+                                new_pos = leader - A * (D1 + D_other) / 2.0
+                            else:  # Search for prey
+                                X_rand = pop[rng.integers(pop_size)]
+                                D2 = abs(C * X_rand - pop[i])
+                                other_pop_idxs = np.where(skill_factors == other_task)[0]
+                                if len(other_pop_idxs) >= 2:
+                                    X_j1 = pop[rng.choice(other_pop_idxs)]
+                                    X_j2 = pop[rng.choice(other_pop_idxs)]
+                                elif len(other_pop_idxs) == 1:
+                                    X_j1 = pop[other_pop_idxs[0]]
+                                    X_j2 = best_pos[other_task]
+                                else:
+                                    X_j1 = best_pos[other_task]
+                                    X_j2 = best_pos[other_task]
+                                D_other = abs(C * X_j1 - X_j2)
+                                new_pos = X_rand - A * (D2 + D_other) / 2.0
+                        else:  # Bubble-net attack
+                            b = 2.5
+                            l = rng.uniform(-1, 1)
+                            D_prime = abs(leader - pop[i])
+                            D_other = abs(C * best_pos[other_task] - X_j)
+                            new_pos = ((D_prime + D_other) / 2.0) * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
+                    else:  # Second way: crossover + mutation
+                        # Step 14-15: Crossover
+                        X_rand_k = pop[rng.integers(pop_size)]
+                        X_rand_new = (X_rand_k + X_j) / 2.0  # Crossover
+                        X_best_new = (best_pos[sf] + best_pos[other_task]) / 2.0
+                        
+                        # Step 16-18: Mutation
+                        if rand_i3 < 0.1:
+                            n_mut = rng.integers(1, min(3, maxK + 1))
+                            mut_dims = rng.choice(maxK, n_mut, replace=False)
+                            for d in mut_dims:
+                                X_rand_new[d] = rng.uniform(1.0, 254.0)
+                                X_best_new[d] = rng.uniform(1.0, 254.0)
+                            mutation_count += 1
+                        
+                        # Step 19: Use best as new position
+                        new_pos = X_best_new
+                    
+                    # Step 20-21: Potentially change skill factor
+                    if rand_i4 < 0.5:
+                        skill_factors[i] = other_task
+                        sf = other_task
+                    
+                    cross_task_count += 1
                 else:
-                    # fallback to intra-task
+                    # Fallback: standard WOA
                     leader = best_pos[sf]
-                    new_pos = pop[i].copy()
-            else:
+                    r1 = rng.random()
+                    r2 = rng.random()
+                    A = 2 * a * r1 - a
+                    C = 2 * r2
+                    p = rng.random()
+                    if p < 0.5:
+                        if abs(A) < 1:
+                            D = abs(C * leader - pop[i])
+                            new_pos = leader - A * D
+                        else:
+                            X_rand = pop[rng.integers(pop_size)]
+                            D = abs(C * X_rand - pop[i])
+                            new_pos = X_rand - A * D
+                    else:
+                        b = 2.5
+                        l = rng.uniform(-1, 1)
+                        distance = abs(leader - pop[i])
+                        new_pos = distance * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
+            else:  # Intra-task: traditional WOA (Algorithm 3, Step 22)
                 # ===== INTRA-TASK WOA OPERATIONS =====
                 leader = best_pos[sf]
                 r1 = rng.random()
@@ -266,12 +341,11 @@ def mfwoa_multitask(
                         D = abs(C * leader - pop[i])
                         new_pos = leader - A * D
                     else:
-                        rand_idx = rng.integers(pop_size)
-                        X_rand = pop[rand_idx]
+                        X_rand = pop[rng.integers(pop_size)]
                         D = abs(C * X_rand - pop[i])
                         new_pos = X_rand - A * D
                 else:
-                    b = 2.5  # OPTIMIZED: increased from 1.0 for tighter spiral convergence
+                    b = 2.5
                     l = rng.uniform(-1, 1)
                     distance = abs(leader - pop[i])
                     new_pos = distance * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
@@ -292,14 +366,12 @@ def mfwoa_multitask(
             
             # ===== EVALUATE NEW POSITION =====
             new_fit = objectives[sf](new_pos)  # ← Constraints enforced INSIDE objective
-            total_xt += 1
             nfe += 1
             
             # replace in next_pop when improved (minimize: new_fit < fitness[i])
             if new_fit < fitness[i]:  # ⚠️ CHANGED: < instead of > for MINIMIZATION
                 next_pop[i] = new_pos
                 fitness[i] = new_fit
-                success_count += 1
                 if new_fit < best_score[sf]:  # ⚠️ CHANGED: < instead of > for MINIMIZATION
                     best_score[sf] = float(new_fit)
                     best_pos[sf] = new_pos.copy()
@@ -327,14 +399,8 @@ def mfwoa_multitask(
         # finalize population for next generation
         pop = next_pop
         
-        # ===== ADAPTIVE RMP (for low-K tasks) =====
-        if rmp_schedule is None and maxK < 8 and total_xt > 0 and g % 10 == 0 and g > 0:
-            frac_succ = success_count / (total_xt + EPS)
-            # nudge rmp toward observed success (clamped)
-            rmp = float(np.clip(0.5 * rmp + 0.5 * frac_succ, 0.05, 0.95))
-            # reset counters
-            success_count = 0
-            total_xt = 0
+        # ===== END OF ITERATION: Update best_score_prev for next RMP check =====
+        best_score_prev = best_score.copy()
         
         # ===== ENHANCED LOGGING =====
         if g % 10 == 0 and g > 0:
