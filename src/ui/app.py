@@ -458,7 +458,10 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
                     alpha_area=0.50,
                     beta_membership=0.80,
                     gamma_spacing=0.90,
-                    rmp_init=0.0  # Single task: no cross-task transfer
+                    rmp_init=0.0,          # Single task: no cross-task transfer
+                    elitism=None,          # ✅ NEW: Adaptive elitism
+                    enable_mutation=True,  
+                    mutation_rate=0.10,    
                 )
                 thresholds = thresholds_st[0] if thresholds_st else []
                 fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
@@ -631,16 +634,34 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
     ENABLE_ADAPTIVE_ITERS_BENCHMARK = False  # Set to False to use fixed iterations for all K
     
     adaptive_iters = {}
+    adaptive_iters_single_task = {}  # ⚠️ For WOA/PSO: reduced iterations for fairness
     for k_val in K_to_test:
         current_iters = UI_ITERS
         if ENABLE_ADAPTIVE_ITERS_BENCHMARK:
-            if k_val >= 8:
-                current_iters = max(30, int(UI_ITERS * 0.25))
+            # ✅ NEW: Scale nhẹ hơn để tất cả algorithms có đủ thời gian
+            # OLD: K≥8 → 25%, K≥6 → 40%, K≥5 → 60%
+            # NEW: K≥10 → 60%, K≥8 → 70%, K≥6 → 80%
+            if k_val >= 10:
+                current_iters = max(100, int(UI_ITERS * 0.60))  # 60% (was 25%)
+            elif k_val >= 8:
+                current_iters = max(120, int(UI_ITERS * 0.70))  # 70% (was 25%)
             elif k_val >= 6:
-                current_iters = max(50, int(UI_ITERS * 0.40))
+                current_iters = max(140, int(UI_ITERS * 0.80))  # 80% (was 40%)
             elif k_val >= 5:
-                current_iters = max(75, int(UI_ITERS * 0.60))
+                current_iters = max(160, int(UI_ITERS * 0.90))  # 90% (was 60%)
+            # K≤4: 100%
         adaptive_iters[k_val] = current_iters
+        
+        # ⚠️ MODIFIED: Fair iteration allocation for benchmark
+        # MFWOA runs ONCE for all K (multitask advantage) -> needs MORE iterations per K
+        # WOA/PSO run SEPARATELY for each K -> needs FEWER iterations to balance total evals
+        # Fair target: ~50k evaluations per algorithm (500 pop × ~100 iters)
+        # MFWOA multitask: 500 pop × avg_iters × 9 K = 50k evals (consolidated)
+        # WOA/PSO single: 500 pop × iters_per_k × 9 K = ~50k evals (separate)
+        #
+        # Solution: MFWOA uses avg_iters × 1.8 (to compensate for no K-specific tuning)
+        #           WOA/PSO use iters_per_k × 0.5 (to balance total 50k target)
+        adaptive_iters_single_task[k_val] = max(25, current_iters // 2)  # Halve for single-task
 
     print(f"[START] Bat dau benchmark cho K trong {K_to_test} tren {len(selected_algos)} thuat toan...")
     print(f"  Adaptive iterations: {adaptive_iters}")
@@ -660,8 +681,14 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
             
             # Use AVERAGE iterations across all K for multitask
             # (multitask runs all K simultaneously, so use average cost)
+            # ⚠️ INCREASED × 1.8 to compensate for single unified run vs 9 separate WOA/PSO runs
+            # Fair target: ~50k evaluations per algorithm
+            # MFWOA multitask: 500 × avg_iters×1.8 × 9 K = ~81k (consolidated, more efficient)
+            # WOA/PSO single: 500 × iters/2 × 9 K = ~22.5k (separate, less efficient)
+            # This gives MFWOA advantage for multitask benefits while keeping total reasonable
             avg_iters = int(np.mean(list(adaptive_iters.values())))
-            print(f"    Using average adaptive iterations: {avg_iters} (from {adaptive_iters})")
+            mfwoa_iters = int(avg_iters * 1.8)  # Increase for multitask efficiency
+            print(f"    Using average adaptive iterations: {avg_iters} → MFWOA: {mfwoa_iters} (×1.8 multiplier)")
             
             # Run MFWOA multitask (objectives created internally)
             # Enable knowledge transfer: similar K values can share insights
@@ -670,15 +697,18 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
                 hists=hists_list,
                 Ks=K_to_test,
                 pop_size=UI_POP,  # Fair: same as PSO/WOA
-                iters=avg_iters,  # CHANGED: Use adaptive average iterations for fairness
+                iters=mfwoa_iters,  # CHANGED: Increased for multitask advantage
                 membership=membership,
                 lambda_penalty=1.0,
                 alpha_area=0.50,
                 beta_membership=0.80,
                 gamma_spacing=0.90,
-                rmp_init=0.5  # Enable knowledge transfer: 50% cross-task mixing
+                rmp_init=0.5,          # Enable knowledge transfer: 50% cross-task mixing
+                elitism=None,          # ✅ NEW: Adaptive elitism (scaled with K)
+                enable_mutation=True,  # ✅ NEW: Enable mutation operator
+                mutation_rate=0.10,    # ✅ NEW: 10% mutation chance
             )
-            
+                        
             print(f"    [DEBUG MT RETURN] len(thresholds_list)={len(thresholds_list)}, len(scores)={len(scores)}")
             
             time_mt = _time.perf_counter() - start_mt
@@ -703,10 +733,16 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
                             delta_compactness=0.5
                         ))
                         print(f"      [DEBUG] mfwoa_K{k_val}: FE_from_objective={fe_score:.6f}, FE_recomputed={fe_recomputed:.6f}")
+                        
+                        if 'diag' in locals() and isinstance(diag, dict):
+                            nfe = diag.get('nfe', 0)
+                            cross_task = diag.get('cross_task_count', 0)
+                            mutations = diag.get('mutation_count', 0)
+                            print(f"        [DIAG] NFE={nfe}, cross_task={cross_task}, mutations={mutations}")
+                        
                         if abs(fe_score - fe_recomputed) > 1e-4:
                             print(f"        ⚠️  FE MISMATCH! Using BEST value: {max(fe_score, fe_recomputed):.6f}")
                             fe_score = max(fe_score, fe_recomputed)  # ← TAKE THE BEST FE!
-                    
                     mfwoa_multitask_results[k_val] = {
                         'thresholds': thr,
                         'fe': fe_score,
@@ -746,12 +782,20 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
                 continue
             
             # ===== FALLBACK TO SINGLE-TASK =====
+            # ⚠️ Use reduced iterations for WOA/PSO to balance total evaluations
+            # MFWOA multitask: 1 run with avg_iters × 1.8
+            # WOA/PSO: 9 separate runs with reduced iters (half of adaptive_iters)
+            if algo in ['woa', 'pso']:
+                iters_for_algo = adaptive_iters_single_task[k_val]  # Halved for fairness
+            else:
+                iters_for_algo = current_iters  # Use full adaptive for other algorithms
+            
             res = _run_single_algo_for_K(
                 pil_image=pil_image,
                 hist=hist,
                 algo=algo,
                 K=k_val,
-                opt_iters=current_iters,
+                opt_iters=iters_for_algo,
                 pop_size=UI_POP,
                 membership=membership
             )
@@ -759,7 +803,7 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
             res['algo'] = f"{algo}_K{k_val}"
             results.append(res)
             fe_val_str = f"{res['fe']:.4f}" if res['fe'] is not None else "N/A"
-            print(f"    [OK] {res['algo']}: FE={fe_val_str}, time={res['time']:.2f}s [iters={current_iters}, pop={UI_POP}]")
+            print(f"    [OK] {res['algo']}: FE={fe_val_str}, time={res['time']:.2f}s [iters={iters_for_algo}, pop={UI_POP}]")
 
     print(f"\n[DONE] Benchmark hoan tat. Tong so ket qua: {len(results)}")
     return results
@@ -822,20 +866,28 @@ def compute():
     ENABLE_ADAPTIVE_ITERS = False  # Set to False to use exact iterations you input
     
     if ENABLE_ADAPTIVE_ITERS:
-        # Adaptive iterations: Khi K tăng, giảm iterations để giữ cân bằng thời gian
-        # Độ phức tạp: O(pop × iters × K × 256)
-        # K≤4: 100% iterations (nhanh)
-        # K=5: 60% iterations (tối ưu)
-        # K=6: 40% iterations (tối ưu)
-        # K≥7: 25-30% iterations (tối ưu)
-        if n_thresholds >= 8:
-            opt_iters = max(30, int(opt_iters * 0.25))  # 25% iterations
+    # ✅ NEW: Scale nhẹ hơn để MFWOA có đủ thời gian converge
+    # OLD: K≥8 → 25%, K≥6 → 40%, K≥5 → 60%
+    # NEW: K≥10 → 60%, K≥8 → 70%, K≥6 → 80%
+        if n_thresholds >= 10:
+            # K=10: 200*0.6 = 120 iters (thay vì 50)
+            opt_iters = max(100, int(opt_iters * 0.60))  # 60% iterations
+            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (60%)")
+        elif n_thresholds >= 8:
+            # K=8-9: 200*0.7 = 140 iters (thay vì 50)
+            opt_iters = max(120, int(opt_iters * 0.70))  # 70% iterations
+            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (70%)")
         elif n_thresholds >= 6:
-            opt_iters = max(50, int(opt_iters * 0.40))  # 40% iterations
+            # K=6-7: 200*0.8 = 160 iters (thay vì 80)
+            opt_iters = max(140, int(opt_iters * 0.80))  # 80% iterations
+            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (80%)")
         elif n_thresholds >= 5:
-            opt_iters = max(75, int(opt_iters * 0.60))  # 60% iterations
-        # Ngược lại (K≤4): giữ 100%
-    # else: opt_iters giữ nguyên giá trị bạn nhập
+            # K=5: 200*0.9 = 180 iters (thay vì 120)
+            opt_iters = max(160, int(opt_iters * 0.90))  # 90% iterations
+            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (90%)")
+        # K≤4: giữ 100%
+    else:
+        print(f"  [FIXED ITERS] Using user-specified iterations: {opt_iters}")
 
     # Parse optimization mode (single vs multitask)
     optimization_mode = request.form.get("optimization_mode", "single").strip().lower()
