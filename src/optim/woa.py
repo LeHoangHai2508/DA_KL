@@ -65,85 +65,83 @@ def woa_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
     for t in range(iters):
         # ===== CẬP NHẬT THAM SỐ WOA =====
         # Update a linearly from 2 to 0 qua các iteration (exploration -> exploitation)
+        # a = 2 - (2/iters) * t: giảm từ 2 xuống 0
         # t=0: a=2.0 (exploration), t=iters-1: a≈0 (exploitation)
         a = 2 * (1 - t / max(1, iters - 1))
         
         # ===== CẬP NHẬT TỪNG CÁ THỂ =====
         # For each whale (cá thể) trong quần thể
+        new_whales = np.copy(whales)  # Store new positions
+        
         for i in range(pop_size):
-            # Constraint whale[i] và tính score
-            current = enforce_threshold_constraints(whales[i])
-            score = objective(current)
-            
-            # ===== CẬP NHẬT GLOBAL BEST =====
-            # Kiểm tra nếu current solution tốt hơn global best
-            if score < best_score:
-                best_score = score
-                best_whale = current.copy()
-            
-            # ===== SINH RANDOM PARAMETERS =====
+            # ===== SINH RANDOM PARAMETERS (theo Algorithm) =====
             # Các tham số ngẫu nhiên điều chỉnh hành động di chuyển
-            r = rng.random()  # r ∈ [0, 1): dùng cho A
-            # A: Coefficient vector điều chỉnh bước nhảy về/từ prey
-            A = 2 * a * r - a  # A ∈ [-a, a]
-            # C: Coefficient vector random weight
-            C = 2 * r  # C ∈ [0, 2]
+            r1 = rng.random()  # r ∈ [0, 1): dùng cho A
+            r2 = rng.random()  # r ∈ [0, 1): dùng cho C
+            # A: Coefficient vector (Eq 2.3): A = 2a*r1 - a, A ∈ [-a, a]
+            A = 2 * a * r1 - a
+            # C: Coefficient vector (Eq 2.4): C = 2*r2, C ∈ [0, 2]
+            C = 2 * r2
             # l: random parameter cho spiral shape
             l = rng.uniform(-1, 1)  # l ∈ [-1, 1]
             # p: probability quyết định strategy (encircle vs spiral)
             p = rng.random()  # p ∈ [0, 1)
             
-            # ===== QUYẾT ĐỊNH STRATEGY =====
+            # Get current whale position
+            current = whales[i]
+            
+            # ===== QUYẾT ĐỊNH STRATEGY (theo Algorithm) =====
+            # Eq 2.6: X(t+1) phụ thuộc vào p và |A|
             if p < 0.5:
                 # ENCIRCLING PREY (50% probability)
-                # Kỹ thuật đốn mồi: di chuyển xung quanh best solution
+                # Eq 2.1-2.2: D = |C * X* - X|, X(t+1) = X* - A*D
                 if abs(A) < 1:
-                    # ===== EXPLOITATION: Encircling best prey =====
-                    # Khi |A| < 1: exploitation phase (khai thác best solution)
-                    # Tính khoảng cách từ current đến best_whale
+                    # ===== EXPLOITATION: Encircling best prey (Eq 2.1-2.2) =====
+                    # Khi |A| < 1: khai thác best solution (tập trung)
+                    # D = |C * X* - X| (Eq 2.1)
                     D = np.abs(C * best_whale - current)
-                    # new_pos = best_whale - A * D: công thức encircling
+                    # X(t+1) = X* - A*D (Eq 2.2)
                     new_pos = best_whale - A * D
                 else:
-                    # ===== EXPLORATION: Search via random whale =====
-                    # Khi |A| >= 1: exploration phase (khám phá không gian)
+                    # ===== EXPLORATION: Search via random whale (Eq 2.7-2.8) =====
+                    # Khi |A| >= 1: khám phá không gian (từ từ)
                     # Chọn một cá thể ngẫu nhiên để follow (không phải best)
-                    random_idx = rng.integers(pop_size)  # random index [0, pop_size)
-                    # Constraint random whale trước use
-                    random_whale = enforce_threshold_constraints(whales[random_idx])
-                    # Tính khoảng cách đến random whale
+                    random_idx = rng.integers(pop_size)
+                    random_whale = whales[random_idx]
+                    # D = |C * X_rand - X| (Eq 2.7)
                     D = np.abs(C * random_whale - current)
-                    # Cập nhật vị trí
+                    # X(t+1) = X_rand - A*D (Eq 2.8)
                     new_pos = random_whale - A * D
             else:
                 # SPIRAL UPDATING (50% probability)
-                # Xoắn ốc di chuyển về best solution (smooth, không bước nhảy)
-                # Tính khoảng cách từ current đến best
-                D = np.abs(best_whale - current)
-                # Tính spiral component: D * e^(b*l) * cos(2π*l)
-                # Exponential decay * oscillation = xoắn ốc logarit
-                spiral = D * np.exp(b * l) * np.cos(2 * np.pi * l)
-                # new_pos = best_whale + spiral: cộng spiral vào best position
-                new_pos = best_whale + spiral
-            
-            # ===== ADAPTIVE STEP SIZE REDUCTION =====
-            # Giảm bước di chuyển qua các iteration (từ từ hội tụ)
-            # step_scale giảm từ 1.0 (iteration đầu) đến 0.1 (iteration cuối)
-            step_scale = 1.0 - 0.9 * (t / max(1, iters - 1))
-            # Áp dụng step scale: blending giữa current và new_pos
-            # Công thức: current + step_scale * (new_pos - current)
-            # Tác dụng: giảm bước nhảy, tăng ổn định
-            new_pos = current + step_scale * (new_pos - current)
+                # Eq 2.5: X(t+1) = D' * e^(b*l) * cos(2π*l) + X*
+                # Xoắn ốc di chuyển về best solution
+                D_prime = np.abs(best_whale - current)
+                # Spiral equation (Eq 2.5)
+                new_pos = D_prime * np.exp(b * l) * np.cos(2 * np.pi * l) + best_whale
             
             # ===== CONSTRAINT VÀ ENFORCE RULES =====
+            # Mandatory move: cập nhật vị trí bất kể tốt hay xấu (WOA pure strategy)
             # Clip vào range [1, 254]
             new_pos = np.clip(new_pos, 1, 254)
-            # Sort để đảm bảo thứ tự tăng dần
-            new_pos = np.sort(new_pos)  # Ensure increasing order
-            # Enforce tất cả constraints (unique, min_gap, etc)
+            # Enforce tất cả constraints (sort, unique, min_gap, etc)
             new_pos = enforce_threshold_constraints(new_pos)
-            # Cập nhật whale[i] với constrained new_pos
-            whales[i] = new_pos
+            # Cập nhật vị trí mới
+            new_whales[i] = new_pos
+        
+        # ===== UPDATE POPULATION AFTER ALL MOVES =====
+        whales = new_whales
+        
+        # ===== EVALUATE ALL WHALES & UPDATE BEST =====
+        # Tính fitness cho tất cả cá thể APRÈS khi cập nhật hết
+        for i in range(pop_size):
+            current = whales[i]
+            score = objective(current)
+            
+            # Cập nhật global best nếu tốt hơn
+            if score < best_score:
+                best_score = score
+                best_whale = current.copy()
     # end iteration loop
     
     # ===== TRẢ VỀ KẾT QUẢ =====
