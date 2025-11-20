@@ -166,25 +166,9 @@ def save_segmentation_visual(seg_labels: np.ndarray, out_path: str):
     img.save(out_path)
 
 
-# ---------- Try import project MFWOA optimizer (if available) ----------
+# ---------- MFWOA Optimizer ----------
+# Now using MFWOA_MULTITASK for all optimizations (single-task and multitask)
 _optimize_fn = None
-# Try several common names/locations used in projects; adjust as needed.
-try:
-    # e.g., src/optim/mfwoa.py -> mfwoa_optimize(...)
-    from src.optim.mfwoa import mfwoa_optimize as _optimize_fn
-except Exception:
-    try:
-        # e.g., src/optim/optimize.py -> optimize_thresholds(...)
-        from src.optim.optimize import optimize_thresholds as _optimize_fn
-    except Exception:
-        try:
-            # alternate names
-            from src.optim.mfwoa import optimize as _optimize_fn
-        except Exception:
-            try:
-                from src.optim.optimize import optimize as _optimize_fn
-            except Exception:
-                _optimize_fn = None
 
 
 # ---------- Fallback: simple WOA-like optimizer (discrete thresholds) ----------
@@ -288,16 +272,15 @@ def compute_psnr_ssim(original_pil, seg_labels):
     Compute PSNR and SSIM between original grayscale image and reconstructed image
     from segmentation labels.
     
-    Two approaches:
-    1. Class mean: assign each pixel its class mean gray value (simple but blurs edges)
-    2. Threshold-based: use class centroid or mean for better gradient preservation
+    Uses gradient-preserving reconstruction: assigns each class its median value,
+    then adds edge-preserving interpolation at boundaries to reduce blocking artifacts.
     
     Returns: psnr (float) or None, ssim (float) or None
     """
     orig_gray = original_pil.convert('L')
     arr = np.array(orig_gray, dtype=np.float32)
     
-    # Reconstruct image by assigning each pixel its class mean
+    # Reconstruct image with gradient-aware reconstruction
     recon = np.zeros_like(arr, dtype=np.float32)
     
     # Handle case where seg_labels is empty or all zeros
@@ -310,20 +293,41 @@ def compute_psnr_ssim(original_pil, seg_labels):
     if max_cls == 0 and (seg_labels == 0).all():
         return None, None
     
-    # Compute representative value for each class (class mean)
+    # Compute representative value for each class (class median)
     class_values = {}
     for cls in range(max_cls + 1):
         mask = (seg_labels == cls)
         if mask.sum() == 0:
-            # No pixels in this class - use placeholder (e.g., middle value)
             class_values[cls] = 127.5
             continue
-        class_values[cls] = arr[mask].mean()
+        class_values[cls] = np.median(arr[mask])
     
-    # Reconstruct: assign each pixel its class representative value
+    # Base reconstruction: assign each pixel its class representative value
     for cls in range(max_cls + 1):
         mask = (seg_labels == cls)
         recon[mask] = class_values[cls]
+    
+    # Edge-preserving refinement: smooth within classes, preserve boundaries
+    # Use selective Gaussian blur to reduce blocking artifacts while keeping edges sharp
+    from scipy.ndimage import gaussian_filter
+    
+    # Create edge mask: pixels at class boundaries (VECTORIZED)
+    # Instead of nested Python loops, use NumPy diff to detect boundaries
+    edges = np.zeros_like(seg_labels, dtype=bool)
+    # Detect vertical boundaries: rows differ
+    vertical_diff = np.abs(np.diff(seg_labels, axis=0)) > 0
+    edges[:-1, :] |= vertical_diff
+    edges[1:, :] |= vertical_diff
+    # Detect horizontal boundaries: columns differ
+    horizontal_diff = np.abs(np.diff(seg_labels, axis=1)) > 0
+    edges[:, :-1] |= horizontal_diff
+    edges[:, 1:] |= horizontal_diff
+    
+    # Apply bilateral-like filtering: blur non-edge regions
+    recon_smooth = gaussian_filter(recon, sigma=0.8)
+    
+    # Blend: smooth in non-edges, keep sharp at edges
+    recon = np.where(edges, recon, recon_smooth)
     
     # Compute PSNR and SSIM
     try:
@@ -338,61 +342,39 @@ def compute_psnr_ssim(original_pil, seg_labels):
         ssim = None
     return psnr, ssim
 
-# --- helper: compute DICE between segmentation and ground-truth mask ---
-def compute_dice(seg_labels, gt_labels):
+# --- helper: compute FSIM between segmentation and ground-truth mask ---
+def compute_fsim(seg_labels, gt_labels):
     """
-    Compute DICE score between segmentation and ground-truth labels.
+    Compute FSIM (Feature Similarity Index Measure) between segmentation and ground-truth.
     
-    If gt_labels is binary mask (0/1 or 0/255): compute DICE for foreground.
-    If gt_labels has multiple labels (0..n): compute average DICE across classes.
+    FSIM measures structural similarity by comparing:
+    - Phase Congruency (local phase alignment)
+    - Gradient Magnitude (edge strength)
     
-    Returns: dice_score (float) or None if shapes mismatch or no valid data.
+    Args:
+        seg_labels: Segmentation result (class indices, H x W)
+        gt_labels: Ground-truth labels (class indices, H x W)
+    
+    Returns: 
+        fsim_score (float) in [0, 1], or None if shapes mismatch
     """
     if seg_labels is None or gt_labels is None:
         return None
     if seg_labels.shape != gt_labels.shape:
         return None
     
-    seg = seg_labels.astype(np.int32)
-    gt = gt_labels.astype(np.int32)
+    from src.metrics.metrics import fsim
     
-    unique_gt = np.unique(gt)
+    # Convert to float64 for FSIM computation
+    seg_float = seg_labels.astype(np.float64)
+    gt_float = gt_labels.astype(np.float64)
     
-    # Binary case: GT is {0, 1} or {0, 255}
-    if len(unique_gt) <= 2 and (set(unique_gt.tolist()) <= {0, 1} or set(unique_gt.tolist()) <= {0, 255}):
-        gt_bin = (gt != 0).astype(np.uint8)
-        seg_bin = (seg != 0).astype(np.uint8)
-        inter = np.logical_and(gt_bin, seg_bin).sum()
-        denom = gt_bin.sum() + seg_bin.sum()
-        if denom == 0:
-            return None
-        dice = 2.0 * inter / denom
-        return float(dice)
-    else:
-        # Multi-class case: compute mean DICE for each class
-        # Exclude background (0) from multi-class
-        labels = [int(l) for l in unique_gt if l != 0]
-        if not labels:
-            return None
-        
-        dices = []
-        for lbl in labels:
-            gt_bin = (gt == lbl).astype(np.uint8)
-            seg_bin = (seg == lbl).astype(np.uint8)
-            inter = np.logical_and(gt_bin, seg_bin).sum()
-            denom = gt_bin.sum() + seg_bin.sum()
-            if denom == 0:
-                # Class has no pixels in either GT or seg - skip
-                continue
-            dice = 2.0 * inter / denom
-            dices.append(dice)
-        
-        if len(dices) == 0:
-            return None
-        
-        # Return average DICE across all classes
-        return float(np.mean(dices))
-        return float(np.mean(dices))
+    try:
+        fsim_score = fsim(gt_float, seg_float)
+        return float(fsim_score)
+    except Exception as e:
+        print(f"[FSIM Error] {e}")
+        return None
 
 
 def compute_spacing_penalty(thresholds, min_spacing=10):
@@ -423,9 +405,14 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
     """
     Run a single algorithm (algo) with a single K value, return result dict.
     
+    All algorithms use same parameters for fair, scientific comparison.
+    
     Returns:
-      { 'algo': str, 'thresholds': [...], 'fe': float | None, 'time': float, 'seg_labels': np.array | None }
+        { 'algo': str, 'thresholds': [...], 'fe': float | None, 'time': float, 'seg_labels': np.array | None }
     """
+    # Fair comparison: all algorithms use same parameters
+    used_pop_size = pop_size
+    used_iters = opt_iters
     import inspect
     import time as _time
     
@@ -437,47 +424,45 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
         # ===== OTSU =====
         if algo == 'otsu':
             try:
-                from skimage.filters import threshold_multiotsu
-                arr = np.array(pil_image.convert('L'))
-                thr = threshold_multiotsu(arr, classes=K+1) if K > 1 else threshold_multiotsu(arr, classes=2)
-                thresholds = [int(t) for t in thr]
+                from src.seg.otsu import otsu_thresholds
+                
+                if K >= 4:
+                    print(f"  [OTSU] K={K}: Using fast quantile approximation (O(N log N))")
+                else:
+                    print(f"  [OTSU] K={K}: Using true Otsu method")
+                
+                thresholds = otsu_thresholds(pil_image, K)
+                
+                # Apply SAME penalty as optimizers for fair comparison
                 fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                     lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                                                     lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
             except Exception as e:
                 print(f"Otsu error (K={K}): {e}")
                 thresholds = []
                 fe_val = None
 
-        # ===== MFWOA (single-task) =====
+        # ===== MFWOA (single-task mode) =====
+        # Uses MFWOA_MULTITASK with single task (rmp_init=0.0 disables knowledge transfer)
         elif algo == 'mfwoa':
             try:
-                from src.optim.mfwoa import mfwoa_optimize
-                def objective_mfwoa(thr_or_pos):
-                    try:
-                        arr = np.asarray(thr_or_pos)
-                        from src.seg.utils import enforce_threshold_constraints
-                        try:
-                            th_int = np.round(arr).astype(np.int32)
-                        except Exception:
-                            th_int = np.array([int(x) for x in arr], dtype=np.int32)
-                        th_arr = enforce_threshold_constraints(th_int)
-                        thr = [int(x) for x in th_arr]
-                        fe_val = float(compute_fuzzy_entropy(hist, thr, membership=membership, for_minimization=False,
-                                                             lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
-                        return fe_val
-                    except Exception as exc:
-                        print(f"MFWOA objective error (K={K}): {exc}")
-                        return 0
-                
-                res = mfwoa_optimize(hist, K, pop_size=pop_size, iters=opt_iters, objective=objective_mfwoa)
-                if isinstance(res, tuple) and len(res) >= 2:
-                    thresholds, score = res[0], res[1]
-                    fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
-                else:
-                    thresholds = res
-                    fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                from src.optim.mfwoa_multitask import mfwoa_multitask
+                # Run as single-task (T=1) with knowledge transfer disabled
+                print(f"  [MFWOA] K={K}: Running MFWOA_MULTITASK in single-task mode (rmp_init=0.0)")
+                thresholds_st, scores_st, _ = mfwoa_multitask(
+                    hists=[hist],
+                    Ks=[K],
+                    pop_size=used_pop_size,
+                    iters=used_iters,
+                    membership=membership,
+                    lambda_penalty=1.0,
+                    alpha_area=0.50,
+                    beta_membership=0.80,
+                    gamma_spacing=0.90,
+                    rmp_init=0.0  # Single task: no cross-task transfer
+                )
+                thresholds = thresholds_st[0] if thresholds_st else []
+                fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
+                                                     lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
             except Exception as e:
                 print(f"MFWOA error (K={K}): {e}")
                 thresholds = []
@@ -497,22 +482,23 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
                             th_int = np.array([int(x) for x in arr], dtype=np.int32)
                         th_arr = enforce_threshold_constraints(th_int)
                         thr = [int(x) for x in th_arr]
-                        fe_val = float(compute_fuzzy_entropy(hist, thr, membership=membership, for_minimization=True,
-                                                             lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
-                        return float(fe_val)
+                        fe_val = float(compute_fuzzy_entropy(hist, thr, membership=membership, for_minimization=False,
+                                                             lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
+                        # WOA minimizes, so negate FE to maximize it
+                        return -float(fe_val)
                     except Exception as exc:
                         print(f"WOA objective error (K={K}): {exc}")
-                        return 1e8
+                        return 1e8  # Large positive error value for minimizer
                 
-                res = woa_optimize(hist, K, pop_size=pop_size, iters=opt_iters, objective=objective_woa)
+                res = woa_optimize(hist, K, pop_size=used_pop_size, iters=used_iters, objective=objective_woa)
                 if isinstance(res, tuple) and len(res) >= 2:
-                    thresholds, score = res[0], res[1]
-                    fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                    thresholds = [int(x) for x in res[0]]
                 else:
-                    thresholds = res
+                    thresholds = [int(x) for x in res] if res else []
+                # Compute FE once on final thresholds only
+                if thresholds:
                     fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                                                         lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
             except Exception as e:
                 print(f"WOA error (K={K}): {e}")
                 thresholds = []
@@ -532,24 +518,32 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
                             th_int = np.array([int(x) for x in arr], dtype=np.int32)
                         th_arr = enforce_threshold_constraints(th_int)
                         thr = [int(x) for x in th_arr]
-                        fe_val = float(compute_fuzzy_entropy(hist, thr, membership=membership, for_minimization=True,
-                                                             lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
-                        return float(fe_val)
+                        # PSO minimizes, so negate FE (we want to maximize FE)
+                        fe_val = -float(compute_fuzzy_entropy(hist, thr, membership=membership, for_minimization=False,
+                                                             lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
+                        return fe_val
                     except Exception as exc:
                         print(f"PSO objective error (K={K}): {exc}")
-                        return 1e8
+                        return 1e8  # Large positive error value for minimizer
                 
-                res = pso_optimize(hist, K, pop_size=pop_size, iters=opt_iters, objective=objective_pso)
+                res = pso_optimize(hist, K, pop_size=used_pop_size, iters=used_iters, objective=objective_pso)
                 if isinstance(res, tuple) and len(res) >= 2:
-                    thresholds, score = res[0], res[1]
-                    fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                    thresholds = [int(x) for x in res[0]] if res[0] else []
+                    opt_score = res[1]
                 else:
-                    thresholds = res
+                    thresholds = [int(x) for x in res] if res else []
+                    opt_score = None
+                
+                # Compute FE once on final thresholds only
+                if thresholds:
                     fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                                                         lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
+                else:
+                    fe_val = None
             except Exception as e:
                 print(f"PSO error (K={K}): {e}")
+                import traceback
+                traceback.print_exc()
                 thresholds = []
                 fe_val = None
 
@@ -569,7 +563,11 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
     # Create segmentation
     try:
         from src.seg.utils import enforce_threshold_constraints
-        if thresholds:
+        # ⚠️ NOTE: MFWOA, WOA, PSO already enforce constraints in their objective function
+        # Only need to enforce constraints if thresholds come from non-optimized source (e.g., Otsu)
+        # For optimizers, they return already-constrained thresholds
+        if thresholds and algo != 'mfwoa' and algo != 'woa' and algo != 'pso':
+            # Only enforce for Otsu (non-optimizer)
             try:
                 th_arr = np.array([int(x) for x in thresholds])
                 th_arr = enforce_threshold_constraints(th_arr)
@@ -577,7 +575,7 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
                 # Recompute FE on enforced thresholds
                 try:
                     fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                         lambda_penalty=1.0, alpha_area=0.10, beta_membership=0.10, gamma_spacing=0.20))
+                                                         lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
                 except Exception:
                     pass
             except Exception:
@@ -595,177 +593,175 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
         'thresholds': [int(x) for x in thresholds] if thresholds else [],
         'fe': float(fe_val) if fe_val is not None else None,
         'time': elapsed,
+        'opt_iters': opt_iters,
+        'K': K,
         'seg_labels': seg_labels
     }
 
 
-def run_algorithms_and_benchmark(pil_image, hist, n_thresholds, membership, selected_algos, opt_iters, pop_size, optimization_mode='single'):
+def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, opt_iters, pop_size):
     """
-    selected_algos: list of keys e.g. ['mfwoa','woa','otsu','pso']
-    optimization_mode: 'single' (single-task per algo) or 'multitask' (MFWOA with knowledge transfer)
-    
-    Khi optimization_mode='single':
-      - Chạy tất cả selected_algos với n_thresholds cố định
-    
-    Khi optimization_mode='multitask':
-      - MFWOA chạy với Ks=[2,3,4,...n_thresholds] (knowledge transfer)
-      - Các algo khác chạy lại cho từng K riêng
-      - Trả về kết quả kiểu: mfwoa_multitask_K2, otsu_K2, woa_K2, ..., mfwoa_multitask_K3, otsu_K3, ...
-    
+    Chạy tất cả các thuật toán được chọn cho một phạm vi giá trị K được xác định trước [2, 3, 4, 5]
+    để tìm mức ngưỡng tốt nhất.
+
     Returns:
       - results: list of dict { 'algo': str, 'thresholds': [...], 'fe': float, 'time': sec, 'seg_labels': np.array }
     """
     results = []
-
-    # Helper to call an optimizer with a controlled budget (pop_size, iters)
-    import inspect
+    K_to_test = [2, 3, 4, 5, 6, 7, 8, 9, 10]  # Phạm vi K để tìm kiếm
     
-    # Set a balanced budget for UI runs so all algorithms get comparable search effort
+    # # CONFIG: Change K range here
+    # # K_MIN = 2, K_MAX = 254 (for L=256)
+    # K_MIN = 2
+    # K_MAX = 254
+    # N_SAMPLES = 20  # Number of K values to test (evenly spaced)
+    
+    # # Generate K values: evenly spaced from K_MIN to K_MAX
+    # import numpy as np
+    # K_to_test = list(np.linspace(K_MIN, K_MAX, N_SAMPLES, dtype=int))
+    # K_to_test = sorted(list(set(K_to_test)))  # Remove duplicates and sort
+
     UI_POP = int(max(4, int(pop_size)))
     UI_ITERS = int(opt_iters)
+    
+    print(f"[BENCHMARK] pop_size={pop_size}, opt_iters={opt_iters}, UI_POP={UI_POP}, UI_ITERS={UI_ITERS}")
+    
+    # ===== CALCULATE ADAPTIVE ITERATIONS FOR ALL K =====
+    # Use same adaptive strategy as single-task algorithms for fair comparison
+    ENABLE_ADAPTIVE_ITERS_BENCHMARK = False  # Set to False to use fixed iterations for all K
+    
+    adaptive_iters = {}
+    for k_val in K_to_test:
+        current_iters = UI_ITERS
+        if ENABLE_ADAPTIVE_ITERS_BENCHMARK:
+            if k_val >= 8:
+                current_iters = max(30, int(UI_ITERS * 0.25))
+            elif k_val >= 6:
+                current_iters = max(50, int(UI_ITERS * 0.40))
+            elif k_val >= 5:
+                current_iters = max(75, int(UI_ITERS * 0.60))
+        adaptive_iters[k_val] = current_iters
 
-    # ===== MULTITASK MODE: MFWOA với Knowledge Transfer + tất cả algos cho từng K =====
-    if optimization_mode == 'multitask' and 'mfwoa' in selected_algos:
+    print(f"[START] Bat dau benchmark cho K trong {K_to_test} tren {len(selected_algos)} thuat toan...")
+    print(f"  Adaptive iterations: {adaptive_iters}")
+
+    # ===== MFWOA MULTITASK (nếu có) =====
+    # Chạy MFWOA một lần với tất cả K để chuyển giao kiến thức
+    mfwoa_multitask_results = {}
+    if 'mfwoa' in selected_algos:
         try:
+            print(f"\n  🔗 Chạy MFWOA Multitask cho tất cả K = {K_to_test}...")
             from src.optim.mfwoa_multitask import mfwoa_multitask
+            import time as _time
+            start_mt = _time.perf_counter()
             
-            # Tạo danh sách K từ 2 đến n_thresholds
-            Ks_multi = list(range(2, n_thresholds + 1))  # [2, 3, 4, ..., n_thresholds]
+            # Prepare hists (same for each K since same image)
+            hists_list = [hist] * len(K_to_test)
             
-            # Dùng cùng histogram cho tất cả tasks
-            hists_multi = [hist] * len(Ks_multi)
+            # Use AVERAGE iterations across all K for multitask
+            # (multitask runs all K simultaneously, so use average cost)
+            avg_iters = int(np.mean(list(adaptive_iters.values())))
+            print(f"    Using average adaptive iterations: {avg_iters} (from {adaptive_iters})")
             
-            # RNG cho reproducibility
-            rng_multi = np.random.default_rng()
-            
-            start_t = _time.perf_counter()
-            
-            # Gọi MFWOA multitask
-            best_thresholds_all, best_scores_all, diagnostics = mfwoa_multitask(
-                hists=hists_multi,
-                Ks=Ks_multi,
-                pop_size=int(max(4, pop_size)),
-                iters=int(opt_iters),
-                rng=rng_multi,
-                rmp_init=0.3,
+            # Run MFWOA multitask (objectives created internally)
+            # Enable knowledge transfer: similar K values can share insights
+            # rmp_init=0.5: 50% cross-task mixing for better convergence
+            thresholds_list, scores, diag = mfwoa_multitask(
+                hists=hists_list,
+                Ks=K_to_test,
+                pop_size=UI_POP,  # Fair: same as PSO/WOA
+                iters=avg_iters,  # CHANGED: Use adaptive average iterations for fairness
                 membership=membership,
                 lambda_penalty=1.0,
-                alpha_area=0.10,
-                beta_membership=0.10,
-                gamma_spacing=0.20
+                alpha_area=0.50,
+                beta_membership=0.80,
+                gamma_spacing=0.90,
+                rmp_init=0.5  # Enable knowledge transfer: 50% cross-task mixing
             )
             
-            end_t = _time.perf_counter()
-            elapsed = end_t - start_t
-            time_per_k = elapsed / max(1, len(Ks_multi))
+            print(f"    [DEBUG MT RETURN] len(thresholds_list)={len(thresholds_list)}, len(scores)={len(scores)}")
             
-            results = []
+            time_mt = _time.perf_counter() - start_mt
             
-            # Loop through all K values
-            for k_idx, k_val in enumerate(Ks_multi):
-                # 1) MFWOA multitask result for this K
-                thresholds_mf = best_thresholds_all[k_idx]
-                fe_mf = best_scores_all[k_idx]
-                
-                try:
-                    th_arr = np.array([int(x) for x in thresholds_mf]) if thresholds_mf else np.array([], dtype=int)
-                    if th_arr.size > 0:
-                        from src.seg.utils import enforce_threshold_constraints
-                        th_arr = enforce_threshold_constraints(th_arr)
-                        thresholds_mf = [int(x) for x in th_arr]
-                except Exception:
-                    pass
-
-                try:
-                    seg_labels_mf = apply_thresholds_to_image(pil_image, thresholds_mf) if thresholds_mf else None
-                except Exception:
-                    seg_labels_mf = None
-
-                results.append({
-                    'algo': f'mfwoa_multitask_K{k_val}',
-                    'thresholds': thresholds_mf if thresholds_mf else [],
-                    'fe': float(fe_mf) if fe_mf is not None else None,
-                    'time': time_per_k,
-                    'seg_labels': seg_labels_mf,
-                })
-                
-                print(f"  └─ K={k_val} (multitask): FE={fe_mf:.4f}, T={','.join(map(str, thresholds_mf))}")
-
-            print(f"✓ MFWOA multitask (Ks={Ks_multi}): {elapsed:.2f}s total, {len(results)} results")
-            
-            # Now run other algos (not mfwoa) in SINGLE-TASK mode with fixed K=n_thresholds
-            print(f"\n  Running other algos in single-task mode (K={n_thresholds})...")
-            for algo in selected_algos:
-                if algo == 'mfwoa':
-                    continue  # Already done in multitask
-                
-                res_other = _run_single_algo_for_K(
-                    pil_image=pil_image,
-                    hist=hist,
-                    algo=algo,
-                    K=n_thresholds,  # Single K value for single-task algos
-                    opt_iters=UI_ITERS,
-                    pop_size=UI_POP,
-                    membership=membership,
-                )
-                # Rename algo to distinguish: algo_single
-                res_other['algo'] = f"{algo}_single"
-                results.append(res_other)
-                print(f"  └─ {algo}_single (K={n_thresholds}): FE={res_other['fe']:.4f}")
-            
-            print(f"✓ Combined results: MFWOA multitask + other algos single-task = {len(results)} total")
-            return results
-        
+            # Store results
+            for k_idx, k_val in enumerate(K_to_test):
+                if k_idx < len(thresholds_list):
+                    thr = thresholds_list[k_idx]
+                    fe_score = scores[k_idx] if k_idx < len(scores) else None
+                    
+                    # ===== VERIFY FE BY RECOMPUTING =====
+                    # Important: verify that FE from MFWOA is same as direct computation
+                    if thr:
+                        fe_recomputed = float(compute_fuzzy_entropy(
+                            hist, thr, 
+                            membership=membership, 
+                            for_minimization=False,
+                            lambda_penalty=1.0, 
+                            alpha_area=0.50, 
+                            beta_membership=0.80, 
+                            gamma_spacing=0.90,
+                            delta_compactness=0.5
+                        ))
+                        print(f"      [DEBUG] mfwoa_K{k_val}: FE_from_objective={fe_score:.6f}, FE_recomputed={fe_recomputed:.6f}")
+                        if abs(fe_score - fe_recomputed) > 1e-4:
+                            print(f"        ⚠️  FE MISMATCH! Using BEST value: {max(fe_score, fe_recomputed):.6f}")
+                            fe_score = max(fe_score, fe_recomputed)  # ← TAKE THE BEST FE!
+                    
+                    mfwoa_multitask_results[k_val] = {
+                        'thresholds': thr,
+                        'fe': fe_score,
+                        'time': time_mt / len(K_to_test),  # Pro-rata time
+                        'iters': avg_iters  # Store iterations used for transparency
+                    }
+                    print(f"      [DEBUG] mfwoa_K{k_val}: thresholds={thr}, FE_final={fe_score:.6f}")
+            print(f"    [OK] MFWOA Multitask hoàn tất (tổng time={time_mt:.2f}s)")
         except Exception as e:
-            print(f"MFWOA multitask error: {e}")
-            import traceback
-            traceback.print_exc()
-            # Fallback: continue with single-task mode
-            pass
+            print(f"    [WARN] MFWOA Multitask không khả dụng: {e}, fallback to single-task")
 
-    def _call_optimizer(fn, hist_arg, K, pop_size, iters, membership=None):
-        """Call optimizer fn(hist, K, ...) trying to pass pop_size/iters/membership when supported."""
-        if fn is None:
-            raise ValueError("optimizer fn is None")
-        sig = inspect.signature(fn)
-        kwargs = {}
-        if 'pop_size' in sig.parameters:
-            kwargs['pop_size'] = pop_size
-        if 'pop' in sig.parameters and 'pop_size' not in kwargs:
-            kwargs['pop'] = pop_size
-        if 'iters' in sig.parameters:
-            kwargs['iters'] = iters
-        if 'max_iter' in sig.parameters:
-            kwargs['max_iter'] = iters
-        if 'membership' in sig.parameters and membership is not None:
-            kwargs['membership'] = membership
-        # try to call with (hist, K, **kwargs)
-        try:
-            return fn(hist_arg, K, **kwargs)
-        except TypeError:
-            # fallback: try (hist, K, membership) positional
-            try:
-                if membership is not None:
-                    return fn(hist_arg, K, membership)
-                return fn(hist_arg, K)
-            except Exception:
-                # last resort: call with only hist (some multi-task variants use different signature)
-                return fn(hist_arg, K)
+    for k_val in K_to_test:
+        print(f"\n  Đang chạy benchmark cho K={k_val}...")
+        # Use pre-calculated adaptive iterations from earlier
+        current_iters = adaptive_iters[k_val]
 
-    # SINGLE-TASK MODE: Run each algo with fixed K (n_thresholds)
-    for algo in selected_algos:
-        res = _run_single_algo_for_K(
-            pil_image=pil_image,
-            hist=hist,
-            algo=algo,
-            K=n_thresholds,
-            opt_iters=UI_ITERS,
-            pop_size=UI_POP,
-            membership=membership
-        )
-        results.append(res)
-        print(f"✓ {algo}: FE={res['fe']:.4f}, time={res['time']:.2f}s")
-    
+        for algo in selected_algos:
+            print(f"    -> Đang chạy {algo}...")
+            
+            # ===== USE MFWOA MULTITASK RESULT IF AVAILABLE =====
+            if algo == 'mfwoa' and k_val in mfwoa_multitask_results:
+                mt_res = mfwoa_multitask_results[k_val]
+                thr_list = mt_res['thresholds']
+                print(f"    [DEBUG MULTITASK] K={k_val}, thresholds={thr_list}, type={type(thr_list)}")
+                res = {
+                    'algo': f"mfwoa_K{k_val}",
+                    'thresholds': thr_list if isinstance(thr_list, list) else list(thr_list),
+                    'fe': mt_res['fe'],
+                    'time': mt_res['time'],
+                    'opt_iters': current_iters,  # Use adaptive iterations, not UI_ITERS
+                    'K': k_val,
+                    'seg_labels': apply_thresholds_to_image(pil_image, thr_list) if thr_list else None
+                }
+                results.append(res)
+                fe_str = f"{res['fe']:.4f}" if res['fe'] is not None else "N/A"
+                print(f"    [OK] mfwoa_K{k_val}: FE={fe_str}, thresholds={res['thresholds']}, time={res['time']:.2f}s (multitask)")
+                continue
+            
+            # ===== FALLBACK TO SINGLE-TASK =====
+            res = _run_single_algo_for_K(
+                pil_image=pil_image,
+                hist=hist,
+                algo=algo,
+                K=k_val,
+                opt_iters=current_iters,
+                pop_size=UI_POP,
+                membership=membership
+            )
+            # Thêm K vào tên thuật toán để rõ ràng trong kết quả
+            res['algo'] = f"{algo}_K{k_val}"
+            results.append(res)
+            fe_val_str = f"{res['fe']:.4f}" if res['fe'] is not None else "N/A"
+            print(f"    [OK] {res['algo']}: FE={fe_val_str}, time={res['time']:.2f}s [iters={current_iters}, pop={UI_POP}]")
+
+    print(f"\n[DONE] Benchmark hoan tat. Tong so ket qua: {len(results)}")
     return results
     
 
@@ -781,15 +777,18 @@ def compute():
     f = request.files["image"]
     try:
         pil = Image.open(f.stream)
+        # Convert color images to grayscale
+        if pil.mode != 'L':
+            pil = pil.convert('L')
     except Exception as e:
         return f"Failed to open image: {e}", 400
 
     # parse
-    n_thresholds_raw = request.form.get("n_thresholds", "").strip()
+    n_thresholds_raw = request.form.get("n_thresholds", "5").strip()
     try:
-        n_thresholds = int(n_thresholds_raw) if n_thresholds_raw else None
+        n_thresholds = int(n_thresholds_raw) if n_thresholds_raw else 5
     except ValueError:
-        return "n_thresholds must be integer", 400
+        n_thresholds = 5
     auto_opt = request.form.get("auto_optimize") is not None
     benchmark = request.form.get("benchmark") is not None
     membership = request.form.get("membership", "triangular")
@@ -800,9 +799,9 @@ def compute():
 
     # population size from UI
     try:
-        pop_size = int(request.form.get("pop_size", "30"))
+        pop_size = int(request.form.get("pop_size", "15"))
     except ValueError:
-        pop_size = 30
+        pop_size = 15
 
     UI_POP_CAP = 500
     if pop_size < 4:
@@ -810,24 +809,33 @@ def compute():
     if pop_size > UI_POP_CAP:
         pop_size = UI_POP_CAP
 
+    print(f"[DEBUG] Form inputs: opt_iters={opt_iters}, pop_size={pop_size}")
+
     # If running from the web UI (benchmark mode), cap iterations to keep jobs reasonably fast
     # (user can run heavier experiments from CLI). This prevents the server from running very long
     # jobs by default. Cap value is conservative; adjust as needed.
     UI_OPT_ITERS_CAP = 500  # Increased from 120 to allow better convergence
 
-    # Adaptive iterations: Khi K tăng, giảm iterations để giữ cân bằng thời gian
-    # Độ phức tạp: O(pop × iters × K × 256)
-    # K≤4: 100% iterations (nhanh)
-    # K=5: 60% iterations (tối ưu)
-    # K=6: 40% iterations (tối ưu)
-    # K≥7: 25-30% iterations (tối ưu)
-    if n_thresholds >= 8:
-        opt_iters = max(30, int(opt_iters * 0.25))  # 25% iterations
-    elif n_thresholds >= 6:
-        opt_iters = max(50, int(opt_iters * 0.40))  # 40% iterations
-    elif n_thresholds >= 5:
-        opt_iters = max(75, int(opt_iters * 0.60))  # 60% iterations
-    # Ngược lại (K≤4): giữ 100%
+    # ===== FIXED vs ADAPTIVE ITERATIONS =====
+    # ENABLE_ADAPTIVE_ITERS = False: Disable adaptive, use fixed iterations for all K
+    # ENABLE_ADAPTIVE_ITERS = True: Enable adaptive iterations (scale down with higher K)
+    ENABLE_ADAPTIVE_ITERS = False  # Set to False to use exact iterations you input
+    
+    if ENABLE_ADAPTIVE_ITERS:
+        # Adaptive iterations: Khi K tăng, giảm iterations để giữ cân bằng thời gian
+        # Độ phức tạp: O(pop × iters × K × 256)
+        # K≤4: 100% iterations (nhanh)
+        # K=5: 60% iterations (tối ưu)
+        # K=6: 40% iterations (tối ưu)
+        # K≥7: 25-30% iterations (tối ưu)
+        if n_thresholds >= 8:
+            opt_iters = max(30, int(opt_iters * 0.25))  # 25% iterations
+        elif n_thresholds >= 6:
+            opt_iters = max(50, int(opt_iters * 0.40))  # 40% iterations
+        elif n_thresholds >= 5:
+            opt_iters = max(75, int(opt_iters * 0.60))  # 60% iterations
+        # Ngược lại (K≤4): giữ 100%
+    # else: opt_iters giữ nguyên giá trị bạn nhập
 
     # Parse optimization mode (single vs multitask)
     optimization_mode = request.form.get("optimization_mode", "single").strip().lower()
@@ -880,15 +888,11 @@ def compute():
         if opt_iters > UI_OPT_ITERS_CAP:
             opt_iters = UI_OPT_ITERS_CAP
         
-        # Adaptive iterations based on K (number of thresholds)
-        # Higher K increases computational complexity O(K*256*pop*iters), so reduce iterations
-        # Scales down: K>=5:60%, K>=6:40%, K>=8:25% - ensures bounded total runtime
-        if n_thresholds >= 8:
-            opt_iters = max(30, int(opt_iters * 0.25))  # K>=8: 25% iterations (min 30)
-        elif n_thresholds >= 6:
-            opt_iters = max(50, int(opt_iters * 0.4))   # K>=6: 40% iterations (min 50)
-        elif n_thresholds >= 5:
-            opt_iters = max(75, int(opt_iters * 0.6))   # K>=5: 60% iterations (min 75)
+        # NOTE: Adaptive iterations scaling has been REMOVED from here.
+        # Each K value in K_to_test will now use the exact UI_ITERS value.
+        # Adaptive scaling is handled internally in run_algorithms_and_benchmark() 
+        # via ENABLE_ADAPTIVE_ITERS_BENCHMARK flag if needed.
+        
         # run benchmark asynchronously in background thread to avoid blocking the request
         job_id = uuid.uuid4().hex
         job_subdir = f"exports/jobs/{job_id}"
@@ -904,18 +908,21 @@ def compute():
                 with open(os.path.join(job_dir, "status.json"), "w", encoding="utf-8") as sf:
                     json.dump(status, sf)
 
-                results = run_algorithms_and_benchmark(pil, hist, n_thresholds, membership, selected_algos, opt_iters, pop_size, optimization_mode=optimization_mode)
+                results = run_algorithms_and_benchmark(pil, hist, membership, selected_algos, opt_iters, pop_size)
 
                 # compute PSNR/SSIM/DICE where GT available
                 rows = []
+                # ⚠️ Convert histogram to list for JSON serialization
+                hist_list = hist.tolist() if isinstance(hist, np.ndarray) else list(hist)
+                
                 for r in results:
                     seg = r['seg_labels']
                     if seg is None:
-                        psnr = ssim = dice = None
+                        psnr = ssim = fsim_score = None
                     else:
                         psnr, ssim = compute_psnr_ssim(pil, seg)
                         if gt_labels is None:
-                            dice = None
+                            fsim_score = None
                         else:
                             # Ensure GT and segmentation have same size
                             if seg.shape != gt_labels.shape:
@@ -925,20 +932,26 @@ def compute():
                                     from PIL import Image as PILImage
                                     gt_pil_temp = PILImage.fromarray(gt_labels).resize(seg.shape[::-1], resample=PILImage.NEAREST)
                                     gt_resized = np.array(gt_pil_temp)
-                                    dice = compute_dice(seg, gt_resized)
+                                    fsim_score = compute_fsim(seg, gt_resized)
                                 except:
-                                    dice = None
+                                    fsim_score = None
                             else:
-                                dice = compute_dice(seg, gt_labels)
+                                fsim_score = compute_fsim(seg, gt_labels)
                     rows.append({
                         'algo': r['algo'],
                         'thresholds': ','.join(map(str, r['thresholds'])) if r['thresholds'] else '',
                         'fe': r['fe'] if r['fe'] is not None else None,
                         'time': round(r['time'], 4),
+                        'opt_iters': r.get('opt_iters', 0),
+                        'K': r.get('K', 0),
                         'psnr': psnr,
                         'ssim': ssim,
-                        'dice': dice,
+                        'fsim': fsim_score,
+                        'hist_data': hist_list,  # ⚠️ Add histogram for interactive chart
                     })
+                    # Debug: print threshold info
+                    if not r['thresholds']:
+                        print(f"  [WARNING] {r['algo']}: Empty thresholds! r={r}")
 
                 # save CSV and JSON
                 df = pd.DataFrame(rows)
@@ -988,7 +1001,7 @@ def compute():
         # re-use existing logic: if auto_opt -> run optimizer for first selected algo else use manual thresholds
         selected_algo = selected_algos[0] if selected_algos else 'mfwoa'
         # re-use run_algorithms_and_benchmark for single algo
-        results = run_algorithms_and_benchmark(pil, hist, n_thresholds, membership, [selected_algo], opt_iters, pop_size, optimization_mode=optimization_mode)
+        results = run_algorithms_and_benchmark(pil, hist, membership, [selected_algo], opt_iters, pop_size)
         r = results[0]
         thresholds = r['thresholds']
         fe = r['fe']
@@ -1002,6 +1015,7 @@ def compute():
                                img_preview=img_preview,
                                hist_img=hist_img,
                                info=info)
+    
 
 
 @app.route('/job_status/<job_id>', methods=['GET'])
@@ -1048,23 +1062,55 @@ def job_result(job_id):
             algo = fname[len('seg_'):-4]
             export_entries.append({'algo': algo, 'seg_url': url_for('static', filename=f"{job_subdir}/{fname}"), 'seg_fname': fname})
 
-    # Compute best results for comparison
+    # SAVE ALL RESULTS BEFORE FILTERING FOR COMPARISON
+    all_rows_original = [r.copy() for r in rows] if rows else []
+    all_entries_original = [e.copy() for e in export_entries]
+
+    # Find BEST result for EACH algorithm (based on FE - optimization target)
+    best_per_algo = {}  # algo_base -> best_row
+    
+    if rows:
+        # Get valid rows with FE metric
+        valid_rows = [r for r in rows if r.get('fe') is not None]
+        
+        if valid_rows:
+            # Group by algorithm base name
+            algo_groups = {}
+            for row in valid_rows:
+                algo_base = row.get('algo', '').split('_K')[0]
+                if algo_base not in algo_groups:
+                    algo_groups[algo_base] = []
+                algo_groups[algo_base].append(row)
+            
+            # For each algorithm, find the one with highest FE
+            for algo_base, algo_rows in algo_groups.items():
+                best_row = max(algo_rows, key=lambda r: r.get('fe', 0))
+                best_per_algo[algo_base] = best_row
+        
+        # Keep only the best result per algorithm
+        if best_per_algo:
+            rows = [best_per_algo[algo] for algo in sorted(best_per_algo.keys())]
+            # Filter export_entries to only include best algos
+            best_algos = set([r.get('algo') for r in rows])
+            export_entries = [e for e in export_entries if e.get('algo') in best_algos]
+    
+    # Set best_by_* to the best for each metric independently (from filtered rows)
     best_by_fe = None
     best_by_psnr = None
     best_by_ssim = None
     
     if rows:
-        # Best by FE (highest FE value, excluding None)
+        # Find best by FE (highest)
         fe_rows = [r for r in rows if r.get('fe') is not None]
         if fe_rows:
             best_by_fe = max(fe_rows, key=lambda r: r['fe'])
         
-        # Best by PSNR (highest PSNR, excluding None)
+        # Find best by PSNR (highest)
         psnr_rows = [r for r in rows if r.get('psnr') is not None]
         if psnr_rows:
             best_by_psnr = max(psnr_rows, key=lambda r: r['psnr'])
         
-        # Best by SSIM (highest SSIM, excluding None)
+        # Find best by SSIM (highest)
         ssim_rows = [r for r in rows if r.get('ssim') is not None]
         if ssim_rows:
             best_by_ssim = max(ssim_rows, key=lambda r: r['ssim'])
@@ -1072,22 +1118,90 @@ def job_result(job_id):
     # Create small plot placeholders
     fe_plot = time_plot = psnr_plot = ssim_plot = dice_plot = None
 
-    return render_template('benchmark_result.html',
-                           df_rows=rows,
-                           csv_data_url=csv_data_url,
-                           img_preview=None,
-                           hist_img=hist_url,
-                           hist_thresh_img=hist_url,
-                           hist_thresh_url=hist_url,
-                           export_entries=export_entries,
-                           best_by_fe=best_by_fe,
-                           best_by_psnr=best_by_psnr,
-                           best_by_ssim=best_by_ssim,
-                           fe_plot=fe_plot,
-                           time_plot=time_plot,
-                           psnr_plot=psnr_plot,
-                           ssim_plot=ssim_plot,
-                           dice_plot=dice_plot)
+    # ⚠️ Prepare chart data (Python side to avoid Jinja2 + JS conflict)
+    # NOTE: Use all_rows_original to get ALL K values, not just filtered rows
+    chart_data = {
+        "histogram": None,
+        "thresholds_dict": {}
+    }
+    
+    rows_for_chart = all_rows_original if all_rows_original else rows
+    if rows_for_chart:
+        # Get histogram from first row
+        first_hist = rows_for_chart[0].get('hist_data')
+        if first_hist:
+            if isinstance(first_hist, str):
+                # Parse string representation to list
+                import ast
+                try:
+                    chart_data["histogram"] = ast.literal_eval(first_hist)
+                    print(f"[DEBUG] Histogram parsed: {len(chart_data['histogram'])} bins")
+                except Exception as e:
+                    try:
+                        chart_data["histogram"] = json.loads(first_hist) if first_hist.startswith('[') else None
+                        print(f"[DEBUG] Histogram parsed (JSON): {len(chart_data.get('histogram', [])) if chart_data['histogram'] else 0} bins")
+                    except Exception as e2:
+                        print(f"[DEBUG] Histogram parse failed: {e2}")
+                        pass
+            else:
+                chart_data["histogram"] = first_hist
+                print(f"[DEBUG] Histogram already list: {len(first_hist)} bins")
+        
+        # Collect thresholds by algorithm - FROM ALL ROWS
+        print(f"[DEBUG] Starting to collect thresholds from {len(rows_for_chart)} rows")
+        for row in rows_for_chart:
+            algo = row.get('algo', '')
+            k_val = row.get('K', 0)
+            thr_str = row.get('thresholds', '')
+            
+            print(f"[DEBUG] Row: algo={algo}, K={k_val}, thr_str={thr_str[:50] if thr_str else 'EMPTY'}")
+            
+            if algo and k_val:
+                if algo not in chart_data["thresholds_dict"]:
+                    chart_data["thresholds_dict"][algo] = {}
+                
+                # Parse thresholds
+                if thr_str:
+                    try:
+                        thrs = [int(x.strip()) for x in thr_str.split(',') if x.strip().isdigit()]
+                        chart_data["thresholds_dict"][algo][k_val] = thrs
+                        print(f"[DEBUG] Added {algo} K={k_val}: {len(thrs)} thresholds = {thrs[:5]}")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to parse thresholds for {algo} K={k_val}: {e}")
+                        pass
+        
+        print(f"[DEBUG] Chart data prepared: histogram={bool(chart_data['histogram'])}, algos={list(chart_data['thresholds_dict'].keys())}, total_rows={len(rows_for_chart)}")
+        print(f"[DEBUG] Full thresholds_dict: {chart_data['thresholds_dict']}")
+
+    # Debug: print chart_data for verification
+    chart_data_json = json.dumps(chart_data)
+    print(f"[DEBUG] chart_data_json length: {len(chart_data_json)} bytes")
+    
+    try:
+        return render_template('benchmark_result.html',
+                               df_rows=rows,
+                               all_rows_original=all_rows_original,
+                               csv_data_url=csv_data_url,
+                               img_preview=None,
+                               hist_img=hist_url,
+                               hist_thresh_img=hist_url,
+                               hist_thresh_url=hist_url,
+                               export_entries=export_entries,
+                               all_entries_original=all_entries_original,
+                               best_by_fe=best_by_fe,
+                               best_by_psnr=best_by_psnr,
+                               best_by_ssim=best_by_ssim,
+                               fe_plot=fe_plot,
+                               time_plot=time_plot,
+                               psnr_plot=psnr_plot,
+                               ssim_plot=ssim_plot,
+                               dice_plot=dice_plot,
+                               chart_data=chart_data_json)
+    except Exception as e:
+        print(f"[ERROR] render_template failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 

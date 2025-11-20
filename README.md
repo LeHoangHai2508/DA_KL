@@ -2,6 +2,29 @@
 
 Hệ thống phân đoạn ảnh đa cấp độ ngưỡng tối ưu hóa Fuzzy Entropy bằng MFWOA, với giao diện web Flask.
 
+## 📚 Tài liệu & Hướng dẫn
+
+> **👉 START HERE**: Đọc [`HANDOFF.md`](HANDOFF.md) hoặc [`DOCUMENTATION_INDEX.md`](DOCUMENTATION_INDEX.md) để hiểu cấu trúc tài liệu.
+
+### Các tài liệu chính (Nov 20, 2025)
+| Tài liệu | Nội dung | Thời gian |
+|---------|---------|----------|
+| **[HANDOFF.md](HANDOFF.md)** | 🎉 Bảng tóm tắt, quick start | 5 phút |
+| **[DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)** | 📍 Bản đồ tất cả tài liệu | 10 phút |
+| **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** | ⚡ Hướng dẫn thực hành, tham số | 30 phút |
+| **[KNOWLEDGE_TRANSFER_GUIDE.md](docs/KNOWLEDGE_TRANSFER_GUIDE.md)** | 🧠 Chi tiết thuật toán, chia sẻ tri thức | 45 phút |
+| **[IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md)** | 📊 Tổng quan hệ thống, benchmarks | 20 phút |
+| **[PROJECT_STATUS.md](docs/PROJECT_STATUS.md)** | ✅ Trạng thái dự án, sẵn sàng triển khai | 15 phút |
+| **[SESSION_SUMMARY.md](docs/SESSION_SUMMARY.md)** | 📝 Công việc hoàn tất trong phiên làm việc | 15 phút |
+
+### Cách tiếp cận nhanh (5 phút)
+1. Đọc phần "What You Have" trong [`HANDOFF.md`](HANDOFF.md)
+2. Chạy: `python -m src.ui.app`
+3. Truy cập: http://localhost:5000
+4. Tải ảnh lên và chạy benchmark
+
+---
+
 ## Cài đặt nhanh
 
 ```powershell

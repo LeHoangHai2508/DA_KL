@@ -52,6 +52,22 @@
     .btn-primary-custom { background: #27ae60; border: none; color: white; padding: 8px 16px; border-radius: 4px; text-decoration: none; cursor: pointer; font-size: 0.85rem; transition: background 0.3s; }
     .btn-primary-custom:hover { background: #229954; color: white; }
     .back-btn { margin-top: 20px; }
+    
+    /* Threshold highlighting */
+    code[style*="color: #d9534f"] {
+      display: inline-block !important;
+      max-width: 100%;
+      overflow: auto;
+    }
+    
+    /* Table responsive improvement */
+    .metrics-table code {
+      display: inline-block;
+      max-width: 100%;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
   </style>
 </head>
 <body>
@@ -63,18 +79,244 @@
 
     <!-- Histogram + Info -->
     <div class="section-card">
-      <div class="section-title">Histogram + Thresholds</div>
-      <div class="info-row">
-        {% if hist_thresh_url %}
-          <img src="{{ hist_thresh_url }}" alt="Histogram + Thresholds" style="max-width: 100%; height: auto; border-radius: 6px;">
-        {% else %}
-          <p style="color: #999;">Histogram not available</p>
-        {% endif %}
+      <div class="section-title">Histogram + Thresholds (Interactive)</div>
+      
+      <!-- Controls -->
+      <div style="display: flex; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; align-items: center;">
+        <!-- Algorithm Toggle -->
+        <div>
+          <label style="font-weight: 600; margin-right: 8px; display: inline-block;">Algorithms:</label>
+          <div style="display: inline-flex; gap: 8px; flex-wrap: wrap;">
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" id="toggle-mfwoa" checked onchange="updateHistogram()">
+              <span style="background: #27ae60; color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.85rem;">MFWOA</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" id="toggle-woa" checked onchange="updateHistogram()">
+              <span style="background: #3498db; color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.85rem;">WOA</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" id="toggle-pso" checked onchange="updateHistogram()">
+              <span style="background: #e74c3c; color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.85rem;">PSO</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px;">
+              <input type="checkbox" id="toggle-otsu" checked onchange="updateHistogram()">
+              <span style="background: #f39c12; color: white; padding: 3px 8px; border-radius: 4px; font-size: 0.85rem;">Otsu</span>
+            </label>
+          </div>
+        </div>
       </div>
+
+      <!-- K Selection -->
+      <div style="margin-bottom: 15px;">
+        <label style="font-weight: 600; display: block; margin-bottom: 8px;">Select K values to display:</label>
+        <div id="k-selector" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
+      </div>
+
+      <!-- Chart -->
+      <div id="histogram-chart" style="width: 100%; height: 500px; border: 1px solid #ddd; border-radius: 6px; background: white;"></div>
+      
       {% if hist_thresh_url %}
-        <a href="{{ hist_thresh_url }}" download class="btn-primary-custom">📥 Download Histogram Image</a>
+        <div style="margin-top: 15px; display: flex; gap: 10px;">
+          <a href="{{ hist_thresh_url }}" download class="btn-primary-custom">📥 Download Static Image</a>
+          <button onclick="document.getElementById('histogram-chart').parentElement.parentElement.querySelector('#histogram-chart').download = 'histogram.png'" class="btn-primary-custom" style="background: #95a5a6;">📊 Export Chart as PNG</button>
+        </div>
       {% endif %}
     </div>
+
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script type="text/javascript">
+      // ⚠️ Simple & Clean: receive prepared data from Python backend
+      // NOTE: Jinja2 template injected here - VS Code lint warning is false positive
+      var _rawChartData = '{{ chart_data|safe }}';
+      const chartData = JSON.parse(_rawChartData);
+      console.log('[DEBUG JS] chartData received:', chartData);
+      
+      const histData = {
+        histogram: chartData.histogram,
+        thresholds: chartData.thresholds_dict
+      };
+      
+      console.log('[DEBUG JS] histData histogram:', histData.histogram ? `${histData.histogram.length} bins` : 'NULL');
+      console.log('[DEBUG JS] histData thresholds keys:', Object.keys(histData.thresholds));
+
+      // Get all unique K values
+      const allKValues = new Set();
+      Object.values(histData.thresholds).forEach(algo => {
+        Object.keys(algo).forEach(k => allKValues.add(parseInt(k)));
+      });
+      const kValues = Array.from(allKValues).sort((a, b) => a - b);
+
+      // Create K selector buttons
+      const kSelector = document.getElementById('k-selector');
+      kValues.forEach(k => {
+        const label = document.createElement('label');
+        label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: #f5f5f5; border-radius: 4px; cursor: pointer;';
+        
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = k;
+        checkbox.checked = false;
+        checkbox.onchange = updateHistogram;
+        
+        const span = document.createElement('span');
+        span.textContent = 'K=' + k;
+        span.style.fontWeight = '600';
+        
+        label.appendChild(checkbox);
+        label.appendChild(span);
+        kSelector.appendChild(label);
+      });
+
+      function updateHistogram() {
+        console.log('[DEBUG JS] updateHistogram called');
+        const selectedMfwoa = document.getElementById('toggle-mfwoa').checked;
+        const selectedWoa = document.getElementById('toggle-woa').checked;
+        const selectedPso = document.getElementById('toggle-pso').checked;
+        const selectedOtsu = document.getElementById('toggle-otsu').checked;
+        const selectedKs = Array.from(document.querySelectorAll('#k-selector input:checked')).map(x => parseInt(x.value));
+
+        console.log('[DEBUG JS] selectedMfwoa:', selectedMfwoa, 'selectedWoa:', selectedWoa, 'selectedPso:', selectedPso, 'selectedOtsu:', selectedOtsu, 'selectedKs:', selectedKs);
+
+        const traces = [];
+        const histBins = Array.from({length: 256}, (_, i) => i);
+        
+        // Add histogram trace (background)
+        if (histData.histogram && histData.histogram.length > 0) {
+          console.log('[DEBUG JS] Adding histogram trace with', histData.histogram.length, 'bins');
+          traces.push({
+            x: histBins,
+            y: histData.histogram,
+            name: 'Histogram',
+            type: 'bar',
+            marker: { color: 'rgba(200, 200, 200, 0.4)' },
+            xaxis: 'x',
+            yaxis: 'y'
+          });
+        } else {
+          console.warn('[DEBUG JS] Histogram is empty or null');  
+        }
+
+        // Add thresholds for MFWOA
+        if (selectedMfwoa) {
+          selectedKs.forEach(k => {
+            const key = 'mfwoa_K' + k;
+            if (histData.thresholds[key] && histData.thresholds[key][k]) {
+              const thrs = histData.thresholds[key][k];
+              console.log(`[DEBUG JS] Adding MFWOA K=${k} thresholds:`, thrs);
+              thrs.forEach((thr, idx) => {
+                traces.push({
+                  x: [thr, thr],
+                  y: [0, 650],
+                  mode: 'lines',
+                  name: `MFWOA K=${k} T[${idx}]`,
+                  line: { color: '#27ae60', width: 2, dash: 'solid' },
+                  xaxis: 'x',
+                  yaxis: 'y',
+                  hovertemplate: `<b>MFWOA K=${k}</b><br>T[${idx}] = ${thr}<extra></extra>`
+                });
+              });
+            }
+          });
+        }
+
+        // Add thresholds for WOA
+        if (selectedWoa) {
+          selectedKs.forEach(k => {
+            const key = 'woa_K' + k;
+            if (histData.thresholds[key] && histData.thresholds[key][k]) {
+              const thrs = histData.thresholds[key][k];
+              thrs.forEach((thr, idx) => {
+                traces.push({
+                  x: [thr, thr],
+                  y: [0, 650],
+                  mode: 'lines',
+                  name: `WOA K=${k} T[${idx}]`,
+                  line: { color: '#3498db', width: 2, dash: 'dash' },
+                  xaxis: 'x',
+                  yaxis: 'y',
+                  hovertemplate: `<b>WOA K=${k}</b><br>T[${idx}] = ${thr}<extra></extra>`
+                });
+              });
+            }
+          });
+        }
+
+        // Add thresholds for PSO
+        if (selectedPso) {
+          selectedKs.forEach(k => {
+            const key = 'pso_K' + k;
+            if (histData.thresholds[key] && histData.thresholds[key][k]) {
+              const thrs = histData.thresholds[key][k];
+              console.log(`[DEBUG JS] Adding PSO K=${k} thresholds:`, thrs);
+              thrs.forEach((thr, idx) => {
+                traces.push({
+                  x: [thr, thr],
+                  y: [0, 650],
+                  mode: 'lines',
+                  name: `PSO K=${k} T[${idx}]`,
+                  line: { color: '#e74c3c', width: 2, dash: 'dot' },
+                  xaxis: 'x',
+                  yaxis: 'y',
+                  hovertemplate: `<b>PSO K=${k}</b><br>T[${idx}] = ${thr}<extra></extra>`
+                });
+              });
+            }
+          });
+        }
+
+        // Add thresholds for Otsu
+        if (selectedOtsu) {
+          selectedKs.forEach(k => {
+            const key = 'otsu_K' + k;
+            if (histData.thresholds[key] && histData.thresholds[key][k]) {
+              const thrs = histData.thresholds[key][k];
+              console.log(`[DEBUG JS] Adding Otsu K=${k} thresholds:`, thrs);
+              thrs.forEach((thr, idx) => {
+                traces.push({
+                  x: [thr, thr],
+                  y: [0, 650],
+                  mode: 'lines',
+                  name: `Otsu K=${k} T[${idx}]`,
+                  line: { color: '#f39c12', width: 2, dash: 'dashdot' },
+                  xaxis: 'x',
+                  yaxis: 'y',
+                  hovertemplate: `<b>Otsu K=${k}</b><br>T[${idx}] = ${thr}<extra></extra>`
+                });
+              });
+            }
+          });
+        }
+
+        const layout = {
+          title: '📊 Interactive Histogram + Thresholds',
+          xaxis: { title: 'Gray Level (0-255)', range: [0, 255] },
+          yaxis: { title: 'Pixel Count' },
+          hovermode: 'closest',
+          height: 500,
+          margin: { l: 60, r: 60, t: 60, b: 60 },
+          plot_bgcolor: '#fafafa',
+          paper_bgcolor: 'white'
+        };
+
+        const config = {
+          responsive: true,
+          displayModeBar: true,
+          toImageButtonOptions: {
+            format: 'png',
+            filename: 'histogram_thresholds',
+            height: 600,
+            width: 1200,
+            scale: 2
+          }
+        };
+
+        Plotly.newPlot('histogram-chart', traces, layout, config);
+      }
+
+      // Initial render
+      updateHistogram();
+    </script>
 
     <!-- Advanced Visualization Plots -->
     
@@ -115,11 +357,17 @@
               {% for row in df_rows %}
                 {% if row.algo == e.algo %}
                   <div class="result-metrics">
+                    <!-- Thresholds - PROMINENT -->
+                    <div style="margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #eee;">
+                      <div style="font-size: 0.7rem; color: #999; font-weight: 600; text-transform: uppercase; margin-bottom: 4px;">Thresholds</div>
+                    </div>
+                                          <code style="display: block; font-size: 0.75rem; background: #f5f5f5; padding: 6px 8px; border-radius: 3px; word-break: break-all; color: #d9534f; font-weight: 500;">{{ row.thresholds }}</code>
+                    <!-- Metrics -->
                     <div class="result-metrics-row"><span>FE:</span><strong>{{ "%.4f"|format(row.fe) if row.fe else "N/A" }}</strong></div>
                     <div class="result-metrics-row"><span>Time:</span><strong>{{ row.time }}s</strong></div>
                     <div class="result-metrics-row"><span>PSNR:</span><strong>{{ "%.2f"|format(row.psnr) if row.psnr else "N/A" }}</strong></div>
                     <div class="result-metrics-row"><span>SSIM:</span><strong>{{ "%.3f"|format(row.ssim) if row.ssim else "N/A" }}</strong></div>
-                    <div class="result-metrics-row"><span>DICE:</span><strong>{{ "%.3f"|format(row.dice) if row.dice else "N/A" }}</strong></div>
+                    <div class="result-metrics-row"><span>FSIM:</span><strong>{{ "%.3f"|format(row.fsim) if row.fsim else "N/A" }}</strong></div>
                   </div>
                   {% if e.seg_url %}
                     <a href="{{ e.seg_url }}" download class="btn-primary-custom download-btn">📥 Download</a>
@@ -156,15 +404,17 @@
           <thead>
             <tr>
               <th>Algorithm</th>
-              <th>Thresholds</th>
+              <th style="min-width: 200px;">Thresholds</th>
+              <th>K</th>
+              <th>Iters</th>
               <th>FE</th>
               <th>Time (s)</th>
               <th>PSNR</th>
               <th>SSIM</th>
-              <th>DICE</th>
+              <th>FSIM</th>
             </tr>
           </thead>
-          <tbody>
+           <tbody>
             {% for row in df_rows %}
               <tr>
                 <td>
@@ -173,19 +423,48 @@
                     <span class="algo-badge algo-badge-multitask">🔗 Multi-K</span>
                   {% endif %}
                 </td>
-                <td><code style="font-size: 0.85rem;">{{ row.thresholds }}</code></td>
+                <td>
+                  <!-- Thresholds with expand/collapse -->
+                  {% set thr_list = row.thresholds.split(',') if row.thresholds else [] %}
+                  {% if thr_list|length > 0 %}
+                    <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#thr-{{ loop.index }}">
+                      📋 {{ thr_list|length }} T
+                    </button>
+                    <div class="collapse mt-2" id="thr-{{ loop.index }}">
+                      <div style="background: #f9f9f9; padding: 10px; border-radius: 4px; max-width: 300px;">
+                        <table class="table table-sm" style="margin-bottom: 0; font-size: 0.8rem;">
+                          <tbody>
+                            {% for thr in thr_list %}
+                              {% if thr.strip() %}
+                                <tr>
+                                  <td><code>T[{{ loop.index0 }}]</code></td>
+                                  <td style="text-align: right;"><strong>{{ thr.strip() }}</strong></td>
+                                </tr>
+                              {% endif %}
+                            {% endfor %}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  {% else %}
+                    <span style="color: #999;">—</span>
+                  {% endif %}
+                </td>
+                <td><strong>{{ row.K }}</strong></td>
+                <td><strong>{{ row.opt_iters }}</strong></td>
                 <td>{{ "%.6f"|format(row.fe) if row.fe else "—" }}</td>
                 <td>{{ "%.4f"|format(row.time) if row.time else "—" }}</td>
                 <td>{{ "%.2f"|format(row.psnr) if row.psnr else "—" }}</td>
                 <td>{{ "%.4f"|format(row.ssim) if row.ssim else "—" }}</td>
-                <td>{{ "%.3f"|format(row.dice) if row.dice is not none else "—" }}</td>
+                <td>{{ "%.3f"|format(row.fsim) if row.fsim is not none else "—" }}</td>
               </tr>
             {% endfor %}
           </tbody>
+
         </table>
       </div>
       <div style="margin-top: 15px; padding: 12px; background: #f9f9f9; border-left: 4px solid #27ae60; border-radius: 4px; font-size: 0.9rem; color: #555;">
-        <strong>📋 Note:</strong> <strong>FE</strong> = Fuzzy Entropy (optimization target, higher is better). <strong>PSNR/SSIM</strong> = image reconstruction quality. <strong>DICE</strong> = segmentation overlap vs ground-truth (shown if GT provided).
+        <strong>📋 Note:</strong> <strong>FE</strong> = Fuzzy Entropy (optimization target, higher is better). <strong>PSNR/SSIM</strong> = image reconstruction quality. <strong>FSIM</strong> = Feature Similarity Index (structural similarity, higher is better).
         <details style="margin-top: 10px;">
           <summary style="cursor: pointer; font-weight: 600; color: #27ae60;">❓ Why is FE high but PSNR/SSIM low?</summary>
           <div style="margin-top: 8px; padding: 8px; background: white; border-radius: 4px; font-size: 0.85rem;">
@@ -273,9 +552,9 @@
     </div>
       <div class="section-title">Segmentation Comparison (All Algorithms)</div>
       <p style="font-size: 0.9rem; color: #666; margin-bottom: 15px;">Segmentation masks colored by class for visual comparison:</p>
-      {% if df_rows and df_rows[0].dice is none %}
+      {% if df_rows and df_rows[0].fsim is none %}
         <div style="padding: 12px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; margin-bottom: 15px; font-size: 0.9rem; color: #856404;">
-          <strong>ℹ️ Note:</strong> Ground-truth (GT) was not provided. DICE scores are not computed. To enable DICE evaluation, upload a ground-truth mask image in the home page form.
+          <strong>ℹ️ Note:</strong> Ground-truth (GT) was not provided. FSIM scores are not computed. To enable FSIM evaluation, upload a ground-truth mask image in the home page form.
         </div>
       {% endif %}
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px;">
@@ -284,22 +563,130 @@
             {% if e.seg_url %}
               <img src="{{ e.seg_url }}" style="width: 100%; height: 200px; object-fit: cover; background: #f0f0f0;" alt="{{ e.algo }}">
             {% endif %}
-            <div style="padding: 12px; text-align: center;">
-              <div style="font-weight: 700; color: #2c3e50; margin-bottom: 8px;">{{ e.algo }}</div>
+            <div style="padding: 12px;">
+              <div style="font-weight: 700; color: #2c3e50; margin-bottom: 10px; text-align: center;">{{ e.algo }}</div>
               {% for row in df_rows %}
                 {% if row.algo == e.algo %}
-                  <div style="font-size: 0.8rem; color: #666;">
-                    <div>Thresholds: <code>{{ row.thresholds }}</code></div>
-                    <div>FE: <strong>{{ "%.4f"|format(row.fe) if row.fe else "N/A" }}</strong></div>
+                  <div style="font-size: 0.75rem; color: #555;">
+                    <div style="margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #eee;">
+                      <div style="color: #999; font-weight: 600; text-transform: uppercase; font-size: 0.7rem; margin-bottom: 4px;">Thresholds</div>
+                      <code style="display: block; background: #f5f5f5; padding: 6px 8px; border-radius: 3px; word-break: break-all; color: #d9534f; font-weight: 500; font-size: 0.75rem;">{{ row.thresholds }}</code>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span>FE:</span>
+                      <strong>{{ "%.4f"|format(row.fe) if row.fe else "N/A" }}</strong>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                      <span>Time:</span>
+                      <strong>{{ row.time }}s</strong>
+                    </div>
                   </div>
                 {% endif %}
               {% endfor %}
               {% if e.seg_url %}
-                <a href="{{ e.seg_url }}" download style="display: inline-block; margin-top: 10px; font-size: 0.8rem; padding: 6px 12px; background: #3498db; color: white; border-radius: 4px; text-decoration: none;">⬇ Download</a>
+                <a href="{{ e.seg_url }}" download style="display: inline-block; margin-top: 12px; width: 100%; text-align: center; font-size: 0.8rem; padding: 8px 12px; background: #3498db; color: white; border-radius: 4px; text-decoration: none; font-weight: 500;">⬇ Download</a>
               {% endif %}
             </div>
           </div>
         {% endfor %}
+      </div>
+    </div>
+
+    <!-- Comparison: Original vs Filtered -->
+    <div class="section-card">
+      <div class="section-title">Comparison: All Results vs Best Result</div>
+      
+      <div style="margin-bottom: 20px;">
+        <p style="color: #666; font-size: 0.9rem;">
+          <strong>Left:</strong> All benchmark results (original, before filtering)
+          <br>
+          <strong>Right:</strong> Best result (filtered by composite score)
+        </p>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+        <!-- Original All Results -->
+        <div style="border: 2px solid #e74c3c; border-radius: 8px; padding: 15px; background: #fff5f5;">
+          <div style="text-align: center; font-weight: 700; color: #e74c3c; margin-bottom: 12px; font-size: 1.1rem;">
+            All Results ({{ all_rows_original|length }} results)
+          </div>
+          
+          <div style="overflow-y: auto; max-height: 400px; background: white; border-radius: 4px; padding: 10px;">
+            <table style="width: 100%; font-size: 0.8rem; border-collapse: collapse;">
+              <thead style="background: #f5f5f5; position: sticky; top: 0;">
+                <tr>
+                  <th style="border-bottom: 2px solid #ddd; padding: 8px; text-align: left;">Algorithm</th>
+                  <th style="border-bottom: 2px solid #ddd; padding: 8px; text-align: center;">FE</th>
+                  <th style="border-bottom: 2px solid #ddd; padding: 8px; text-align: center;">PSNR</th>
+                  <th style="border-bottom: 2px solid #ddd; padding: 8px; text-align: center;">SSIM</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in all_rows_original %}
+                <tr style="border-bottom: 1px solid #eee;">
+                  <td style="padding: 8px; text-align: left;"><code style="font-size: 0.75rem;">{{ row.algo }}</code></td>
+                  <td style="padding: 8px; text-align: center;">{{ "%.4f"|format(row.fe) if row.fe else "—" }}</td>
+                  <td style="padding: 8px; text-align: center;">{{ "%.2f"|format(row.psnr) if row.psnr else "—" }}</td>
+                  <td style="padding: 8px; text-align: center;">{{ "%.3f"|format(row.ssim) if row.ssim else "—" }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Best Filtered Result -->
+        <div style="border: 2px solid #27ae60; border-radius: 8px; padding: 15px; background: #f0fef5;">
+          <div style="text-align: center; font-weight: 700; color: #27ae60; margin-bottom: 12px; font-size: 1.1rem;">
+            Best Result (1 result)
+          </div>
+          
+          <div style="background: white; border-radius: 4px; padding: 15px;">
+            {% if df_rows and df_rows[0] %}
+              {% set best = df_rows[0] %}
+              <div style="margin-bottom: 12px;">
+                <label style="color: #666; font-size: 0.85rem; font-weight: 600;">Algorithm</label>
+                <div style="font-size: 0.95rem; font-weight: 700; color: #2c3e50;">{{ best.algo }}</div>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+                <div style="background: #f9f9f9; padding: 10px; border-radius: 4px;">
+                  <label style="color: #666; font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 4px;">FE</label>
+                  <div style="font-size: 1.1rem; font-weight: 700; color: #27ae60;">{{ "%.4f"|format(best.fe) if best.fe else "—" }}</div>
+                </div>
+                <div style="background: #f9f9f9; padding: 10px; border-radius: 4px;">
+                  <label style="color: #666; font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 4px;">PSNR</label>
+                  <div style="font-size: 1.1rem; font-weight: 700; color: #27ae60;">{{ "%.2f"|format(best.psnr) if best.psnr else "—" }}</div>
+                </div>
+                <div style="background: #f9f9f9; padding: 10px; border-radius: 4px;">
+                  <label style="color: #666; font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 4px;">SSIM</label>
+                  <div style="font-size: 1.1rem; font-weight: 700; color: #27ae60;">{{ "%.3f"|format(best.ssim) if best.ssim else "—" }}</div>
+                </div>
+                <div style="background: #f9f9f9; padding: 10px; border-radius: 4px;">
+                  <label style="color: #666; font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 4px;">Time</label>
+                  <div style="font-size: 1.1rem; font-weight: 700; color: #27ae60;">{{ best.time }}s</div>
+                </div>
+              </div>
+
+              <div style="background: #f9f9f9; padding: 10px; border-radius: 4px;">
+                <label style="color: #666; font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 4px;">Thresholds</label>
+                <code style="display: block; font-size: 0.85rem; color: #d9534f; font-weight: 500; word-break: break-all;">{{ best.thresholds }}</code>
+              </div>
+            {% else %}
+              <p style="color: #999; text-align: center;">No best result</p>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <!-- Summary -->
+      <div style="margin-top: 20px; padding: 15px; background: #f0f9ff; border-left: 4px solid #3498db; border-radius: 4px;">
+        <strong style="color: #2c3e50;">Summary:</strong>
+        <div style="margin-top: 8px; font-size: 0.9rem; color: #555;">
+          <div>Total algorithms tested: <strong>{{ all_rows_original|length }}</strong></div>
+          <div>Best algorithm selected: <strong>{{ df_rows[0].algo if df_rows else 'N/A' }}</strong></div>
+          <div>Selection method: Composite score (FE + PSNR + SSIM normalized)</div>
+        </div>
       </div>
     </div>
 

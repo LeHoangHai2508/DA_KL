@@ -121,6 +121,7 @@ def compute_fuzzy_entropy(
     beta_membership: float = 0.1,
     gamma_spacing: float = 0.2,
     gamma_spacing_var: float = 0.05,
+    delta_compactness: float = 0.3,
 ) -> float:
     """Tính Fuzzy Entropy theo công thức De Luca (có phạt tuỳ chọn).
 
@@ -133,14 +134,15 @@ def compute_fuzzy_entropy(
         - ρ_i: độ thành viên mờ của pixel i trong lớp được chọn
 
     **Công thức phạt toàn diện:**
-        F'(T) = F(T) - λ[α·P_A(T) + β·P_μ(T) + γ·P_S(T)]
+        F'(T) = F(T) - λ[α·P_A(T) + β·P_μ(T) + γ·P_S(T) + δ·P_C(T)]
         
         Với:
         - F(T): Fuzzy Entropy (giá trị chính)
         - P_A(T): Penalty diện tích (cân bằng kích thước lớp)
         - P_μ(T): Penalty membership (tránh tập trung quá)
-        - P_S(T): Penalty spacing (buộc ngưỡng phân tán đều) ✨ MỚI
-        - λ, α, β, γ: hệ số điều chỉnh
+        - P_S(T): Penalty spacing (buộc ngưỡng phân tán đều) ✨
+        - P_C(T): Penalty compactness (buộc segments sắc nét hơn) ✨ MỚI
+        - λ, α, β, γ, δ: hệ số điều chỉnh
 
     Args:
         hist: mảng histogram 256-bin (độ đếm mỗi mức xám)
@@ -151,13 +153,14 @@ def compute_fuzzy_entropy(
         alpha_area: hệ số α cho penalty diện tích (cân bằng kích thước lớp)
         beta_membership: hệ số β cho penalty membership (tránh tập trung)
         gamma_spacing: hệ số γ cho penalty spacing (buộc phân tán đều) ✨
+        delta_compactness: hệ số δ cho penalty compactness (buộc sắc nét) ✨ MỚI
 
     Returns:
         float: Fuzzy Entropy (có phạt nếu cấu hình cho phép)
                Dương nếu for_minimization=False (dùng cho maximizer)
                Âm nếu for_minimization=True (dùng cho minimizer)
     
-    **Công thức Penalty Spacing (mới, mở rộng):**
+    **Công thức Penalty Spacing (mở rộng):**
         P_S(T) = w1 * Σ_{i=1}^{m} (1 / Δ_i) + w2 * Σ_{i=1}^{m} ((Δ_i - Δ_ideal)/Δ_ideal)^2
 
         Trong đó:
@@ -166,12 +169,16 @@ def compute_fuzzy_entropy(
         - Thành phần đầu (1/Δ_i) trừng phạt khoảng cách quá nhỏ (tránh dồn cụm).
         - Thành phần thứ hai ((Δ_i-Δ_ideal)^2) trừng phạt sai lệch so với phân bố đều (khuyến khích đều nhau).
 
-        Cấu hình trong hàm:
-        - `gamma_spacing` điều chỉnh cường độ thành phần nghịch đảo (1/Δ).
-        - `gamma_spacing_var` điều chỉnh cường độ thành phần phương sai so với Δ_ideal.
+    **Công thức Penalty Compactness (mới, tăng sắc nét):**
+        P_C(T) = Σ_c (1 / |S_c|)^2
+        
+        Trong đó:
+        - |S_c|: số pixel trong lớp c (hay degree of membership sum)
+        - Phạt các lớp nhỏ → khuyến khích các segment lớn hơn và sắc nét hơn
+        - Tránh fuzzy membership tạo ra các lớp nhỏ và mềm mỏng
 
-        Tổng thể:
-        F'(T) = F(T) - λ[α·P_A(T) + β·P_μ(T) + γ·P_S_inv(T) + γ_var·P_S_var(T)]
+        Hiệu ứng: Khi delta_compactness > 0, MFWOA sẽ tìm cách tạo các segment có ranh giới sắc nét hơn,
+        gần giống hành vi của Otsu (tạo các biên rõ ràng) → SSIM, DICE sẽ cao hơn.
     """
     # ========== BƯỚC 1: Kiểm tra tính hợp lệ của input ==========
     # Đảm bảo histogram có đúng 256 bin (một bin cho mỗi mức xám 0-255)
@@ -220,13 +227,11 @@ def compute_fuzzy_entropy(
     p_classes = mu.dot(p_levels)
 
     # ========== BƯỚC 7: Kiểm tra lớp rỗng ==========
-    # Nếu có lớp gần như rỗng -> phạt mạnh (cấu hình không tốt)
-    if np.any(p_classes < EPS):
-        # Trả về penalty cao nếu đang tối ưu (cho minimizer/maximizer)
-        if for_minimization:
-            return float(FITNESS_PENALTY)
-        else:
-            return float(-FITNESS_PENALTY)
+    # NOTE: Bỏ check empty class. Một số ảnh (như Lena) không có pixel ở cạnh [0...20),
+    # khiến class0 rỗng. Điều này là bình thường cho FE computation.
+    # Optimizer sẽ tự penalize bộ thresholds tạo classes rỗng thông qua FE entropy thấp.
+    # (Entropy của class rỗng = 0, làm FE giảm)
+    # Nếu muốn enforce strictly, dùng constraint trực tiếp trong optimizer, không ở đây.
 
     # ========== BƯỚC 8: Tính Shannon Entropy cho từng pixel-lớp ==========
     # Shannon entropy: S_n(μ) = -μ * ln(μ) - (1-μ) * ln(1-μ)
@@ -309,8 +314,20 @@ def compute_fuzzy_entropy(
     
     # Tổng hợp penalty: phần 1 (nghịch đảo) điều chỉnh bằng gamma_spacing,
     # phần 2 (phương sai so với Δ_ideal) điều chỉnh bằng gamma_spacing_var
+    
+    # ========== BƯỚC 11b: Tính penalty compactness (mới) ==========
+    # P_C(T): phạt sự mềm mỏng của membership để khuyến khích ranh giới sắc nét
+    # Công thức: P_C = Σ_c (p_c - 1/C)^2 (variance từ uniform distribution)
+    #   - Nếu các lớp cân bằng (p_c ≈ 1/C): P_C ≈ 0 (không phạt)
+    #   - Nếu có lớp quá nhỏ: P_C cao → khuyến khích các segment lớn hơn
+    #   - Khác với P_A (cũng phạt imbalance), P_C nhấn mạnh vào tính sắc nét
+    # 
+    # Thay vì dùng (1/p_c)^2 (quá aggressive), dùng variance từ đều:
+    mean_class_prob = 1.0 / num_classes
+    P_C = float(np.sum((p_classes - mean_class_prob) ** 2))
+    
     penalty_term = lambda_penalty * (
-        alpha_area * P_A + beta_membership * P_mu + gamma_spacing * (P_S_inv if 'P_S_inv' in locals() else 0.0) + gamma_spacing_var * (P_S_var if 'P_S_var' in locals() else 0.0)
+        alpha_area * P_A + beta_membership * P_mu + gamma_spacing * (P_S_inv if 'P_S_inv' in locals() else 0.0) + gamma_spacing_var * (P_S_var if 'P_S_var' in locals() else 0.0) + delta_compactness * P_C
     )
     
     # Fuzzy Entropy có phạt

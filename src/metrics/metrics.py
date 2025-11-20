@@ -1,11 +1,11 @@
-"""Image quality metrics: PSNR, SSIM, and DICE (pure functions).
+"""Image quality metrics: PSNR, SSIM, FSIM (pure functions).
 
 Simple, dependency-light implementations suitable for grayscale images.
 """
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, sobel
 
 
 def psnr(original: np.ndarray, compared: np.ndarray, data_range: float = 255.0) -> float:
@@ -71,6 +71,85 @@ def ssim(original: np.ndarray, compared: np.ndarray, data_range: float = 255.0, 
     den = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
     ssim_map = num / (den + 1e-12)
     return float(np.mean(ssim_map))
+
+
+def fsim(original: np.ndarray, compared: np.ndarray, T1: float = 0.85, T2: float = 160.0) -> float:
+    """Compute Feature Similarity Index Measure (FSIM) for two grayscale images.
+    
+    FSIM measures structural similarity by comparing:
+    1. Phase Congruency (PC) - local phase alignment
+    2. Gradient Magnitude (G) - local contrast/edge strength
+    
+    Args:
+        original: Original image array (reference)
+        compared: Compared image array (distorted)
+        T1: Constant to avoid division by zero in phase similarity (default 0.85)
+        T2: Constant to avoid division by zero in gradient similarity (default 160.0)
+    
+    Returns:
+        FSIM value in [0, 1], higher is better
+        
+    Reference: L. Zhang et al., "FSIM: A Feature Similarity Index for Image Quality Assessment"
+    """
+    if original.shape != compared.shape:
+        raise ValueError("shapes must match")
+    
+    orig = original.astype(np.float64)
+    comp = compared.astype(np.float64)
+    
+    # Compute gradients using Sobel operator
+    # Returns gradient magnitude in x and y directions
+    gx1 = sobel(orig, axis=1)  # Gradient in x direction (reference)
+    gy1 = sobel(orig, axis=0)  # Gradient in y direction (reference)
+    G1 = np.sqrt(gx1**2 + gy1**2)  # Gradient magnitude (reference)
+    
+    gx2 = sobel(comp, axis=1)  # Gradient in x direction (compared)
+    gy2 = sobel(comp, axis=0)  # Gradient in y direction (compared)
+    G2 = np.sqrt(gx2**2 + gy2**2)  # Gradient magnitude (compared)
+    
+    # Compute phase congruency (simplified as normalized gradients)
+    # In full FSIM, PC is computed from phase information via Fourier-based analysis
+    # For practical grayscale implementation, we use gradient orientation alignment
+    # PC represents how well the local phase/orientation aligns between images
+    
+    # Compute phase congruency as dot product of normalized gradients
+    # Avoid division by zero
+    eps = 1e-10
+    mag1 = np.sqrt(gx1**2 + gy1**2) + eps
+    mag2 = np.sqrt(gx2**2 + gy2**2) + eps
+    
+    # Normalized gradients (direction vectors)
+    gx1_norm = gx1 / mag1
+    gy1_norm = gy1 / mag1
+    gx2_norm = gx2 / mag2
+    gy2_norm = gy2 / mag2
+    
+    # Phase congruency: dot product of normalized gradients
+    # Value in [-1, 1]; 1 means perfect alignment
+    PC1 = gx1_norm * gx2_norm + gy1_norm * gy2_norm
+    PC1 = (PC1 + 1.0) / 2.0  # Map from [-1, 1] to [0, 1]
+    
+    # Simplified version: use normalized gradient magnitudes directly
+    PC1_alt = (G1 / (G1.max() + eps)) if G1.max() > 0 else np.zeros_like(G1)
+    PC2_alt = (G2 / (G2.max() + eps)) if G2.max() > 0 else np.zeros_like(G2)
+    
+    # Phase similarity map: measures how similar the local structures are
+    S_PC = (2.0 * PC1_alt * PC2_alt + T1) / (PC1_alt**2 + PC2_alt**2 + T1)
+    
+    # Gradient similarity: measures edge strength similarity
+    G1_norm = G1 / (G1.max() + eps) if G1.max() > 0 else G1
+    G2_norm = G2 / (G2.max() + eps) if G2.max() > 0 else G2
+    S_G = (2.0 * G1_norm * G2_norm + T2) / (G1_norm**2 + G2_norm**2 + T2)
+    
+    # Importance map: use max of normalized gradients
+    P_C = np.maximum(PC1_alt, PC2_alt)
+    
+    # Global FSIM: weighted average of similarities
+    numerator = np.sum(S_PC * S_G * P_C)
+    denominator = np.sum(P_C) + eps
+    
+    fsim_value = numerator / denominator
+    return float(np.clip(fsim_value, 0.0, 1.0))
 
 
 def dice_coefficient(y_true: np.ndarray, y_pred: np.ndarray, smooth: float = 1e-6) -> float:

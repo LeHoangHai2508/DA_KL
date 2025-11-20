@@ -52,9 +52,46 @@
           <div class="card-header">Metrics</div>
           <div class="card-body">
             <p><strong>Mode:</strong> {{ info }}</p>
-            <p><strong>Thresholds:</strong> {{ thresholds }}</p>
             <p><strong>Membership:</strong> {{ membership }}</p>
             <p><strong>Fuzzy Entropy (De Luca-Termini):</strong> <code>{{ "%.4f"|format(fe) if fe else "N/A" }}</code></p>
+            
+            <!-- Thresholds Display -->
+            <div class="mt-3">
+              <strong>Ngưỡng (Thresholds):</strong>
+              <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#thresholds-detail">
+                📋 Xem chi tiết
+              </button>
+              <div class="collapse mt-2" id="thresholds-detail">
+                {% if thresholds %}
+                  <div class="table-responsive">
+                    <table class="table table-sm table-striped">
+                      <thead>
+                        <tr>
+                          <th>Vị trí</th>
+                          <th>Giá trị ngưỡng</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {% set thr_list = thresholds.split(',') if thresholds is string else thresholds %}
+                        {% for idx, thr in enumerate(thr_list) %}
+                          {% if thr %}
+                            <tr>
+                              <td><code>T[{{ idx }}]</code></td>
+                              <td><code>{{ thr.strip() }}</code></td>
+                            </tr>
+                          {% endif %}
+                        {% endfor %}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="alert alert-info alert-sm mt-2">
+                    <small><strong>Số ngưỡng:</strong> {{ thr_list|length }} | <strong>Dạng:</strong> [{{ thresholds }}]</small>
+                  </div>
+                {% else %}
+                  <div class="alert alert-warning alert-sm">Không có ngưỡng nào</div>
+                {% endif %}
+              </div>
+            </div>
           </div>
         </div>
 

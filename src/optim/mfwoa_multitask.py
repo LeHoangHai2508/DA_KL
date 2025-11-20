@@ -51,7 +51,7 @@ def mfwoa_multitask(
     rng: np.random.Generator = None,
     rmp_init: float = 0.3,
     pop_per_task: int = None,
-    elitism: int = 3,
+    elitism: int = 5,  # INCREASED: from 3 to 5 for stronger elite preservation
     rmp_schedule: Sequence[tuple] = None,
     membership: str = "triangular",
     lambda_penalty: float = 1.0,
@@ -100,9 +100,14 @@ def mfwoa_multitask(
     # ===== OBJECTIVES PER TASK: Sử dụng same penalties như app.py =====
     # compute_fuzzy_entropy(hist, thresholds, membership, for_minimization=False,
     #                       lambda_penalty, alpha_area, beta_membership, gamma_spacing)
+    # 
+    # ⚠️  IMPORTANT: MFWOA is a MINIMIZER (like WOA/PSO), so objectives should return -FE
+    # to be consistent with other optimizers. WOA negates FE before passing to minimizer:
+    #   objective(pos) returns -FE, and WOA minimizes -FE to maximize FE.
+    # We do the same here for consistency.
     def make_obj(hist, K):
         def obj_task(pos):
-            """Objective function: maximize fuzzy entropy with penalties"""
+            """Objective function: minimize -FE (equivalent to maximizing FE) with penalties"""
             thr = continuous_to_thresholds(pos, K)
             # Tính FE với penalties (same formula như app.py)
             # for_minimization=False: sẽ trả về FE (cao hơn tốt hơn)
@@ -113,9 +118,12 @@ def mfwoa_multitask(
                 lambda_penalty=lambda_penalty,
                 alpha_area=alpha_area,
                 beta_membership=beta_membership,
-                gamma_spacing=gamma_spacing
+                gamma_spacing=gamma_spacing,
+                delta_compactness=0.0  # Không dùng compactness, rely on gamma_spacing
             )
-            return float(fe_val)
+            # Negate to convert maximization (FE) to minimization (-FE)
+            # This matches WOA's approach: minimize -FE instead of maximize FE
+            return -float(fe_val)
         return obj_task
     
     objectives = [make_obj(h, K) for h, K in zip(hists, Ks)]
@@ -123,14 +131,14 @@ def mfwoa_multitask(
     # initialize population and skill factors
     pop = rng.uniform(0.0, 255.0, size=(pop_size, maxK))
     skill_factors = rng.integers(low=0, high=T, size=pop_size)
-    fitness = np.full(pop_size, -np.inf)
+    fitness = np.full(pop_size, np.inf)  # ⚠️ CHANGED: initialize to +inf for MINIMIZATION
     # evaluate initial
     for i in range(pop_size):
         sf = int(skill_factors[i])
         fitness[i] = objectives[sf](pop[i])
     # best per task
     best_pos = [None] * T
-    best_score = [-np.inf] * T
+    best_score = [np.inf] * T  # ⚠️ CHANGED: initialize to +inf for MINIMIZATION
     # Ensure at least one individual per task: if any task has zero, assign by round-robin
     counts = np.bincount(skill_factors, minlength=T)
     if np.any(counts == 0):
@@ -147,19 +155,32 @@ def mfwoa_multitask(
     for t in range(T):
         mask = (skill_factors == t)
         if mask.any():
-            # compute masked argmax safely
-            masked = np.where(mask, fitness, -np.inf)
-            idx = int(np.argmax(masked))
+            # ⚠️ CHANGED: compute MINIMUM instead of MAXIMUM (argmin instead of argmax)
+            # Because objectives now return -FE (negated) and we minimize
+            masked = np.where(mask, fitness, np.inf)
+            idx = int(np.argmin(masked))
             best_pos[t] = pop[idx].copy()
             best_score[t] = float(fitness[idx])
 
     rmp = float(rmp_init)
     success_count = 0
     total_xt = 0
+    cross_task_count = 0  # DEBUG: track cross-task transfers
 
     # history logging
     history = {t: [] for t in range(T)}
     nfe = 0
+
+    # DEBUG: Log knowledge transfer config and population distribution
+    print(f"  [MFWOA-MT] T={T} tasks, pop_size={pop_size}, iters={iters}, rmp_init={rmp_init}, elitism={elitism}")
+    # Count individuals per task
+    counts = np.bincount(skill_factors, minlength=T)
+    counts_str = ", ".join([f"K{Ks[t]}:{counts[t]}" for t in range(T)])
+    print(f"    Population distribution: {counts_str} (total={pop_size})")
+    # Show initial best per task
+    x_best_str = ", ".join([f"K{Ks[t]}:FE={-best_score[t]:.4f}" for t in range(T)])
+    print(f"    Initial X-best per task: {x_best_str}")
+    print(f"    RMP (cross-task rate) = {rmp:.3f} (0.0=no transfer, 1.0=all cross-task)")
 
     for g in range(iters):
         frac = g / max(1, iters)
@@ -189,6 +210,7 @@ def mfwoa_multitask(
                     # mix leader genes into current
                     beta = rng.random()
                     new_pos = pop[i] * (1 - beta) + leader * beta
+                    cross_task_count += 1  # DEBUG: track transfer
                 else:
                     # fallback to intra-task
                     leader = best_pos[sf]
@@ -211,7 +233,7 @@ def mfwoa_multitask(
                         D = abs(C * X_rand - pop[i])
                         new_pos = X_rand - A * D
                 else:
-                    b = 1.0
+                    b = 2.5  # OPTIMIZED: increased from 1.0 for tighter spiral convergence
                     l = rng.uniform(-1, 1)
                     distance = abs(leader - pop[i])
                     new_pos = distance * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
@@ -222,27 +244,27 @@ def mfwoa_multitask(
             new_fit = objectives[sf](new_pos)
             total_xt += 1
             nfe += 1
-            # replace in next_pop when improved
-            if new_fit > fitness[i]:
+            # replace in next_pop when improved (minimize: new_fit < fitness[i])
+            if new_fit < fitness[i]:  # ⚠️ CHANGED: < instead of > for MINIMIZATION
                 next_pop[i] = new_pos
                 fitness[i] = new_fit
                 success_count += 1
-                if new_fit > best_score[sf]:
+                if new_fit < best_score[sf]:  # ⚠️ CHANGED: < instead of > for MINIMIZATION
                     best_score[sf] = float(new_fit)
                     best_pos[sf] = new_pos.copy()
 
-        # apply elitism: preserve top-N individuals per task into next_pop
+        # apply elitism: preserve best-N individuals per task into next_pop
         if elitism and elitism > 0:
             for t in range(T):
                 mask = (skill_factors == t)
                 if np.count_nonzero(mask) == 0:
                     continue
-                # select indices of mask sorted by fitness desc
+                # select indices of mask sorted by fitness ascending (best = lowest for minimization)
                 idxs = np.where(mask)[0]
                 # if fewer individuals than elitism, preserve all
                 if idxs.size <= elitism:
                     continue
-                sorted_idxs = idxs[np.argsort(-fitness[idxs])]
+                sorted_idxs = idxs[np.argsort(fitness[idxs])]  # ⚠️ CHANGED: ascending order for minimization
                 elite_idxs = sorted_idxs[:elitism]
                 # copy elites into their positions in next_pop
                 for ei in elite_idxs:
@@ -259,10 +281,22 @@ def mfwoa_multitask(
             # reset counters
             success_count = 0
             total_xt = 0
+            # DEBUG: Print progress every 10 iterations
+            x_best_str = ", ".join([f"K{Ks[t]}:FE={-best_score[t]:.4f}" for t in range(T)])
+            print(f"      [Iter {g:3d}] X-best: {x_best_str}, RMP={rmp:.3f}, nfe={nfe}")
+        
         # log best per-task for history
         for t in range(T):
             history[t].append(best_score[t])
     # finalize best thresholds
     best_thresholds = [continuous_to_thresholds(best_pos[t], Ks[t]) if best_pos[t] is not None else [] for t in range(T)]
+    # ⚠️ IMPORTANT: Negate best_score back to positive FE for reporting
+    # (objectives return -FE for minimization, but we want to report positive FE values)
+    
+    # DEBUG: Report final stats
+    x_best_final = ", ".join([f"K{Ks[t]}:FE={-best_score[t]:.4f}" for t in range(T)])
+    print(f"  [MFWOA-MT DONE] Final X-best: {x_best_final}")
+    print(f"    cross_task_transfers={cross_task_count}/{nfe} ({100*cross_task_count/(nfe+1):.1f}%), rmp_final={rmp:.3f}")
+    
     diagnostics = {'history': history, 'nfe': nfe}
-    return best_thresholds, [float(s) for s in best_score], diagnostics
+    return best_thresholds, [-float(s) for s in best_score], diagnostics

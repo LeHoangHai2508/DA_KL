@@ -60,11 +60,11 @@
         <input type="file" name="gt" accept="image/*" style="color: #bbb;">
       </div>
 
-      <!-- K (Thresholds) -->
-      <div class="controls-group">
+      <!-- K (Thresholds) - Hidden but value set for backend -->
+      <!-- <div class="controls-group" style="display:none;">
         <label>Số ngưỡng (K)</label>
-        <input type="number" name="n_thresholds" min="1" max="10" value="4" required>
-      </div>
+        <input type="number" name="n_thresholds" min="1" max="10" value="5" required>
+      </div> -->
 
       <!-- Algorithm Selection -->
       <div class="controls-group">
@@ -87,33 +87,26 @@
         </div>
       </div>
 
-      <!-- MFWOA Mode Selection -->
-      <div class="controls-group">
-        <label>🔗 MFWOA Mode (nếu chọn MFWOA)</label>
+      <!-- MFWOA Mode Selection (Hidden, forced to multitask) -->
+      <div class="controls-group" style="display:none;">
+        <label>🔗 MFWOA Mode</label>
         <div class="algo-checkbox">
-          <input type="radio" name="optimization_mode" value="single" id="mode_single" checked>
-          <label for="mode_single">Single-task (K cố định)</label>
+          <input type="radio" name="optimization_mode" value="multitask" id="mode_multitask" checked>
+          <label for="mode_multitask">Multitask</label>
         </div>
-        <div class="algo-checkbox">
-          <input type="radio" name="optimization_mode" value="multitask" id="mode_multitask">
-          <label for="mode_multitask">Multitask (MFWOA K=[2..K] + others single-task)</label>
-        </div>
-        <small style="color: #aaa; margin-top: 0.5rem; display: block;">
-          ℹ️ Single: Tất cả algos chỉ chạy 1 K cố định. Multitask: MFWOA tối ưu đồng thời K=[2..K], sau đó Otsu/WOA/PSO chạy single-task với K cố định.
-        </small>
       </div>
 
       <!-- Optimizer Parameters -->
       <div class="controls-group">
         <label>pop: <span id="pop-display">30</span></label>
-        <input type="range" name="pop_size" id="pop_size" min="4" max="100" value="30" step="1">
+        <input type="range" name="pop_size" id="pop_size" min="4" max="1000" value="30" step="1">
       </div>
 
       <div class="controls-group">
         <label>iters: <span id="iter-display">100</span> 
           <small id="iter-adaptive" style="color: #aaa; font-weight: normal;"></small>
         </label>
-        <input type="range" name="opt_iters" id="opt_iters" min="10" max="500" value="100" step="10">
+        <input type="range" name="opt_iters" id="opt_iters" min="10" max="1000" value="100" step="10">
       </div>
 
       <!-- Membership -->
@@ -125,10 +118,10 @@
         </select>
       </div>
 
-      <!-- Benchmark -->
-      <div class="controls-group">
+      <!-- Benchmark (Hidden, forced on) -->
+      <div class="controls-group" style="display:none;">
         <div style="display: flex; align-items: center;">
-          <input type="checkbox" name="benchmark" id="benchmark" style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;">
+          <input type="checkbox" name="benchmark" id="benchmark" checked style="width: 18px; height: 18px; margin-right: 8px; cursor: pointer;">
           <label for="benchmark" style="margin: 0; cursor: pointer; font-weight: 600;">Run Benchmark</label>
         </div>
       </div>
@@ -164,64 +157,144 @@
   </div>
 
   <script>
-    // Range sliders display and adaptive iterations based on K
-    document.getElementById('pop_size').addEventListener('input', (e) => {
-      document.getElementById('pop-display').textContent = e.target.value;
-    });
-    
-    document.getElementById('opt_iters').addEventListener('input', (e) => {
-      document.getElementById('iter-display').textContent = e.target.value;
-      updateAdaptiveInfo();
-    });
-    
-    // Update adaptive iterations message based on K - matches Python logic in app.py
-    function updateAdaptiveInfo() {
+    // Wait for DOM to be fully loaded before attaching events
+    document.addEventListener('DOMContentLoaded', function() {
+      // Range sliders display and adaptive iterations based on K
+      const popSlider = document.getElementById('pop_size');
+      if (popSlider) {
+        popSlider.addEventListener('input', (e) => {
+          document.getElementById('pop-display').textContent = e.target.value;
+        });
+      }
+      
+      const iterSlider = document.getElementById('opt_iters');
+      if (iterSlider) {
+        iterSlider.addEventListener('input', (e) => {
+          document.getElementById('iter-display').textContent = e.target.value;
+          updateAdaptiveInfo();
+        });
+      }
+      
+      // Update adaptive iterations message based on K - matches Python logic in app.py
+      function updateAdaptiveInfo() {
+        const kInput = document.querySelector('input[name="n_thresholds"]');
+        const itersInput = document.getElementById('opt_iters');
+        const adaptiveLabel = document.getElementById('iter-adaptive');
+        
+        if (!kInput || !itersInput) return;
+        
+        const K = parseInt(kInput.value) || 4;
+        const iters = parseInt(itersInput.value) || 100;
+        let actualIters = iters;
+        
+        // Match Python logic: K>=8: 25%, K>=6: 40%, K>=5: 60%
+        if (K >= 8) {
+          actualIters = Math.max(30, Math.floor(iters * 0.25));
+        } else if (K >= 6) {
+          actualIters = Math.max(50, Math.floor(iters * 0.4));
+        } else if (K >= 5) {
+          actualIters = Math.max(75, Math.floor(iters * 0.6));
+        }
+        
+        if (K > 4) {
+          adaptiveLabel.textContent = `(→ ${actualIters} for K=${K})`;
+        } else {
+          adaptiveLabel.textContent = '';
+        }
+      }
+      
+      // Watch K changes
       const kInput = document.querySelector('input[name="n_thresholds"]');
-      const itersInput = document.getElementById('opt_iters');
-      const adaptiveLabel = document.getElementById('iter-adaptive');
-      
-      if (!kInput || !itersInput) return;
-      
-      const K = parseInt(kInput.value) || 4;
-      const iters = parseInt(itersInput.value) || 100;
-      let actualIters = iters;
-      
-      // Match Python logic: K>=8: 25%, K>=6: 40%, K>=5: 60%
-      if (K >= 8) {
-        actualIters = Math.max(30, Math.floor(iters * 0.25));
-      } else if (K >= 6) {
-        actualIters = Math.max(50, Math.floor(iters * 0.4));
-      } else if (K >= 5) {
-        actualIters = Math.max(75, Math.floor(iters * 0.6));
+      if (kInput) {
+        kInput.addEventListener('change', updateAdaptiveInfo);
+        kInput.addEventListener('input', updateAdaptiveInfo);
       }
-      
-      if (K > 4) {
-        adaptiveLabel.textContent = `(→ ${actualIters} for K=${K})`;
+
+      // Image preview - with error handling and grayscale conversion
+      const imageInput = document.querySelector('input[type="file"][name="image"]');
+      if (imageInput) {
+        imageInput.addEventListener('change', (e) => {
+          const file = e.target.files[0];
+          if (!file) {
+            console.warn('No file selected');
+            return;
+          }
+          
+          // Check file type
+          if (!file.type.startsWith('image/')) {
+            alert('Please select a valid image file');
+            return;
+          }
+          
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            // Convert image to grayscale using canvas
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              canvas.width = img.width;
+              canvas.height = img.height;
+              const ctx = canvas.getContext('2d');
+              
+              // Draw original image
+              ctx.drawImage(img, 0, 0);
+              
+              // Get image data and convert to grayscale
+              const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const data = imageData.data;
+              
+              // Convert RGB to grayscale using luminosity formula
+              for (let i = 0; i < data.length; i += 4) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                // Luminosity formula: 0.299R + 0.587G + 0.114B
+                const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+                data[i] = gray;      // R
+                data[i + 1] = gray;  // G
+                data[i + 2] = gray;  // B
+                // data[i + 3] keeps alpha unchanged
+              }
+              
+              // Put converted image back to canvas
+              ctx.putImageData(imageData, 0, 0);
+              
+              // Display grayscale image
+              const previewImg = document.getElementById('preview_img');
+              if (previewImg) {
+                previewImg.src = canvas.toDataURL('image/png');
+              }
+            };
+            img.onerror = () => {
+              console.error('Failed to load image');
+              alert('Failed to load image');
+            };
+            img.src = ev.target.result;
+          };
+          reader.onerror = (error) => {
+            console.error('FileReader error:', error);
+            alert('Failed to read image file');
+          };
+          reader.readAsDataURL(file);
+        });
       } else {
-        adaptiveLabel.textContent = '';
+        console.error('Image input element not found');
       }
-    }
-    
-    // Watch K changes
-    document.querySelector('input[name="n_thresholds"]').addEventListener('change', updateAdaptiveInfo);
-    document.querySelector('input[name="n_thresholds"]').addEventListener('input', updateAdaptiveInfo);
 
-    // Image preview
-    document.querySelector('input[type="file"][name="image"]').addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        document.getElementById('preview_img').src = ev.target.result;
-      };
-      reader.readAsDataURL(file);
-    });
-
-    // Form submit
-    document.getElementById('form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      // Submit normally to redirect to processing/result page
-      e.target.submit();
+      // Form submit
+      const form = document.getElementById('form');
+      if (form) {
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          // Validate file is selected
+          if (!imageInput || !imageInput.files[0]) {
+            alert('Please select an image first');
+            return;
+          }
+          // Submit normally to redirect to processing/result page
+          form.submit();
+        });
+      }
     });
   </script>
 </body>

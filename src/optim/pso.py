@@ -64,12 +64,16 @@ def pso_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
     pbest = particles.copy()
     # pbest_scores: lưu score (fitness) của pbest
     # Tính fitness cho tất cả particles
-    pbest_scores = np.array([objective(enforce_threshold_constraints(p)) for p in pbest])
+    pbest_scores = np.array([objective(enforce_threshold_constraints(p)) for p in pbest], dtype=object)
     
     # ===== GLOBAL BEST =====
     # gbest_idx: chỉ số particle có best score toàn swarm
-    # argmin: trả về chỉ số của phần tử nhỏ nhất (PSO minimize)
-    gbest_idx = pbest_scores.argmin()
+    # Filter out None scores để tìm best valid score
+    valid_scores = [(i, s) for i, s in enumerate(pbest_scores) if s is not None]
+    if not valid_scores:
+        # Nếu không có valid score, return empty
+        return [], None
+    gbest_idx = min(valid_scores, key=lambda x: x[1])[0]
     # gbest: position của best particle
     gbest = pbest[gbest_idx].copy()
     # gbest_score: score của best particle
@@ -121,30 +125,38 @@ def pso_optimize(hist: np.ndarray, K: int, pop_size: int, iters: int,
         
         # ===== ĐÁNH GIÁ TOÀN PARTICLES =====
         # Tính fitness (objective score) cho tất cả particles sau khi cập nhật
-        scores = np.array([objective(enforce_threshold_constraints(p)) for p in particles])
+        scores = np.array([objective(enforce_threshold_constraints(p)) for p in particles], dtype=object)
         
         # ===== CẬP NHẬT PERSONAL BEST =====
         # Tìm particles nào có score tốt hơn pbest của nó
-        # improved: mảng boolean [True/False] cho mỗi particle
-        improved = scores < pbest_scores  # Element-wise comparison
-        # Nếu có particles cải thiện
-        if np.any(improved):
-            # Cập nhật pbest của các particles cải thiện
-            pbest[improved] = particles[improved]  # Gán new position
-            pbest_scores[improved] = scores[improved]  # Gán new score
+        # Handle None values: chỉ so sánh khi cả hai đều valid
+        for i in range(pop_size):
+            if scores[i] is not None and pbest_scores[i] is not None:
+                if scores[i] < pbest_scores[i]:
+                    pbest[i] = particles[i].copy()
+                    pbest_scores[i] = scores[i]
+            elif scores[i] is not None and pbest_scores[i] is None:
+                # Nếu pbest cũ là None nhưng score mới valid, update
+                pbest[i] = particles[i].copy()
+                pbest_scores[i] = scores[i]
         
         # ===== CẬP NHẬT GLOBAL BEST =====
-        # Tìm particle có best score trong pbest
-        min_idx = pbest_scores.argmin()
-        # Nếu best score hiện tại tốt hơn global best
-        if pbest_scores[min_idx] < gbest_score:
-            # Cập nhật global best
-            gbest = pbest[min_idx].copy()  # Gán new best position
-            gbest_score = pbest_scores[min_idx]  # Gán new best score
+        # Tìm particle có best valid score trong pbest
+        valid_pbest = [(i, s) for i, s in enumerate(pbest_scores) if s is not None]
+        if valid_pbest:
+            min_idx = min(valid_pbest, key=lambda x: x[1])[0]
+            # Nếu best score hiện tại tốt hơn global best
+            if gbest_score is None or pbest_scores[min_idx] < gbest_score:
+                # Cập nhật global best
+                gbest = pbest[min_idx].copy()  # Gán new best position
+                gbest_score = pbest_scores[min_idx]  # Gán new best score
     # end iteration loop
     
     # ===== TRẢ VỀ KẾT QUẢ =====
     # Constraint global best một lần nữa để đảm bảo
+    if gbest_score is None:
+        # Không tìm được valid threshold, return empty
+        return [], None
     final_thresholds = enforce_threshold_constraints(gbest)
     # Chuyển từ float về int (làm tròn)
     return [int(t) for t in final_thresholds], float(gbest_score)
