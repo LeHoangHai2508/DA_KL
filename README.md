@@ -36,7 +36,8 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 python -m pip install --upgrade pip setuptools wheel ninja cmake scikit-image
 ```
-
+pip install torch --index-url https://download.pytorch.org/whl/cu118
+set CUDA_VISIBLE_DEVICES=1
 ## Chạy ứng dụng
 
 ```powershell

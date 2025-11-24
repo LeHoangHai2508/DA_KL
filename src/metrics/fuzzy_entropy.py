@@ -7,7 +7,14 @@ from __future__ import annotations
 from typing import Literal, Sequence
 
 import numpy as np
-
+# try:
+#     import torch
+#     _HAS_TORCH = torch.cuda.is_available()
+#     _TORCH_DEVICE = torch.device("cuda" if _HAS_TORCH else "cpu")
+# except Exception:
+#     torch = None
+#     _HAS_TORCH = False
+#     _TORCH_DEVICE = None
 EPS = 1e-12
 # When a threshold set produces empty classes, we treat the true FE as invalid/zero
 # for plotting and comparison (FE_true). For optimizers we still need a strong
@@ -261,6 +268,28 @@ def compute_fuzzy_entropy(
     # Sum chiều class (axis=0): Σ_c S_n(μ_c(y)) cho mỗi y
     # Dot với p_levels: Σ_y p(y) * (...)
     H_entropy = num_classes * float(np.sum(p_levels * np.sum(S, axis=0))) / np.log(2.0)
+    
+    
+    
+       # ========== BƯỚC 8 + 9: Tính Shannon Entropy (ưu tiên GPU nếu có) ==========
+    # num_classes = mu.shape[0]
+
+    # if torch is not None and _HAS_TORCH:
+        
+
+    #     mu_t = torch.from_numpy(mu).to(_TORCH_DEVICE, dtype=torch.float32)
+    #     p_levels_t = torch.from_numpy(p_levels).to(_TORCH_DEVICE, dtype=torch.float32)
+
+    #     mu_safe_t = torch.clamp(mu_t, EPS, 1.0 - EPS)
+    #     S_t = -mu_safe_t * torch.log(mu_safe_t) - (1.0 - mu_safe_t) * torch.log(1.0 - mu_safe_t)
+    #     S_sum_c_t = torch.sum(S_t, dim=0)
+    #     H_t = num_classes * torch.sum(p_levels_t * S_sum_c_t) / np.log(2.0)
+    #     H_entropy = float(H_t.item())
+    # else:
+    #     mu_safe = np.clip(mu, EPS, 1.0 - EPS)
+    #     S = -mu_safe * np.log(mu_safe) - (1.0 - mu_safe) * np.log(1.0 - mu_safe)
+    #     H_entropy = num_classes * float(np.sum(p_levels * np.sum(S, axis=0))) / np.log(2.0)
+
 
     # ========== BƯỚC 10: Tính penalty (nếu lambda_penalty > 0) ==========
     # Penalty diện tích: P_A(T)

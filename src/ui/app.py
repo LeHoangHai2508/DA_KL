@@ -271,76 +271,132 @@ def compute_psnr_ssim(original_pil, seg_labels):
     """
     Compute PSNR and SSIM between original grayscale image and reconstructed image
     from segmentation labels.
-    
-    Uses gradient-preserving reconstruction: assigns each class its median value,
-    then adds edge-preserving interpolation at boundaries to reduce blocking artifacts.
-    
-    Returns: psnr (float) or None, ssim (float) or None
     """
+    if seg_labels is None:
+        return None, None
+
+    # Ảnh gốc xám
     orig_gray = original_pil.convert('L')
     arr = np.array(orig_gray, dtype=np.float32)
-    
-    # Reconstruct image with gradient-aware reconstruction
+
+    # Đảm bảo seg_labels là mảng 2D int32, cùng kích thước với ảnh gốc
+    seg = np.asarray(seg_labels)
+    if seg.ndim > 2:
+        seg = np.squeeze(seg)
+
+    from PIL import Image as PILImage
+
+    if seg.shape != arr.shape:
+        try:
+            seg_pil = PILImage.fromarray(seg.astype(np.int32))
+            seg_pil = seg_pil.resize(orig_gray.size, resample=PILImage.NEAREST)
+            seg = np.array(seg_pil, dtype=np.int32)
+        except Exception:
+            return None, None
+    else:
+        seg = seg.astype(np.int32)
+
+    if seg.size == 0:
+        return None, None
+
+    max_cls = int(seg.max())
+    if max_cls < 0:
+        return None, None
+
+    # Base reconstruction: mỗi lớp dùng median intensity trong ảnh gốc
     recon = np.zeros_like(arr, dtype=np.float32)
-    
-    # Handle case where seg_labels is empty or all zeros
-    if seg_labels is None or seg_labels.size == 0:
-        return None, None
-    
-    max_cls = int(seg_labels.max()) if seg_labels.max() > 0 else 0
-    
-    # If no valid segmentation, return None
-    if max_cls == 0 and (seg_labels == 0).all():
-        return None, None
-    
-    # Compute representative value for each class (class median)
-    class_values = {}
     for cls in range(max_cls + 1):
-        mask = (seg_labels == cls)
-        if mask.sum() == 0:
-            class_values[cls] = 127.5
+        mask = (seg == cls)
+        if not mask.any():
             continue
-        class_values[cls] = np.median(arr[mask])
-    
-    # Base reconstruction: assign each pixel its class representative value
-    for cls in range(max_cls + 1):
-        mask = (seg_labels == cls)
-        recon[mask] = class_values[cls]
-    
-    # Edge-preserving refinement: smooth within classes, preserve boundaries
-    # Use selective Gaussian blur to reduce blocking artifacts while keeping edges sharp
+        recon[mask] = np.median(arr[mask])
+
+    # Pixel chưa gán (nếu có) gán xám trung bình
+    unmapped = (recon == 0) & (seg >= 0)
+    if unmapped.any():
+        recon[unmapped] = 127.5
+
+    # Edge-preserving refinement
     from scipy.ndimage import gaussian_filter
-    
-    # Create edge mask: pixels at class boundaries (VECTORIZED)
-    # Instead of nested Python loops, use NumPy diff to detect boundaries
-    edges = np.zeros_like(seg_labels, dtype=bool)
-    # Detect vertical boundaries: rows differ
-    vertical_diff = np.abs(np.diff(seg_labels, axis=0)) > 0
+
+    edges = np.zeros_like(seg, dtype=bool)
+    # biên dọc
+    vertical_diff = np.abs(np.diff(seg, axis=0)) > 0
     edges[:-1, :] |= vertical_diff
     edges[1:, :] |= vertical_diff
-    # Detect horizontal boundaries: columns differ
-    horizontal_diff = np.abs(np.diff(seg_labels, axis=1)) > 0
+    # biên ngang
+    horizontal_diff = np.abs(np.diff(seg, axis=1)) > 0
     edges[:, :-1] |= horizontal_diff
     edges[:, 1:] |= horizontal_diff
-    
-    # Apply bilateral-like filtering: blur non-edge regions
+
     recon_smooth = gaussian_filter(recon, sigma=0.8)
-    
-    # Blend: smooth in non-edges, keep sharp at edges
     recon = np.where(edges, recon, recon_smooth)
-    
-    # Compute PSNR and SSIM
+
+    # PSNR và SSIM
     try:
         psnr = float(sk_ms_psnr(arr, recon, data_range=255))
     except Exception as e:
         print(f"PSNR error: {e}")
         psnr = None
+
     try:
-        ssim = float(sk_ms_ssim(arr.astype(np.uint8), recon.astype(np.uint8), data_range=255))
+        ssim = float(sk_ms_ssim(arr.astype(np.uint8),
+                                recon.astype(np.uint8),
+                                data_range=255))
     except Exception as e:
         print(f"SSIM error: {e}")
         ssim = None
+
     return psnr, ssim
+def compute_fsim_original(original_pil, seg_labels):
+    """Compute FSIM giữa ảnh gốc xám và ảnh tái tạo từ nhãn phân đoạn."""
+    from src.metrics.metrics import fsim
+    import numpy as np
+    from PIL import Image as PILImage
+
+    if seg_labels is None:
+        return None
+
+    # Ảnh gốc xám
+    orig_gray = original_pil.convert('L')
+    arr = np.array(orig_gray, dtype=np.float64)
+
+    # Nhãn phân đoạn
+    seg = np.asarray(seg_labels, dtype=np.int32)
+    if seg.ndim > 2:
+        seg = np.squeeze(seg)
+
+    if seg.shape != arr.shape:
+        try:
+            seg_pil = PILImage.fromarray(seg.astype(np.int32))
+            seg_pil = seg_pil.resize(orig_gray.size, resample=PILImage.NEAREST)
+            seg = np.array(seg_pil, dtype=np.int32)
+        except Exception:
+            return None
+
+    max_cls = int(seg.max())
+    if max_cls < 0:
+        return None
+
+    # Tái tạo ảnh từ nhãn: mỗi lớp lấy median intensity
+    recon = np.zeros_like(arr, dtype=np.float64)
+    for cls in range(max_cls + 1):
+        mask = (seg == cls)
+        if not mask.any():
+            continue
+        recon[mask] = float(np.median(arr[mask]))
+
+    # Pixel chưa gán (nếu có)
+    unmapped = (recon == 0) & (seg >= 0)
+    if unmapped.any():
+        recon[unmapped] = 127.5
+
+    try:
+        score = fsim(arr, recon)
+        return float(score)
+    except Exception:
+        return None
+
 
 # --- helper: compute FSIM between segmentation and ground-truth mask ---
 def compute_fsim(seg_labels, gt_labels):
@@ -440,36 +496,40 @@ def _run_single_algo_for_K(pil_image, hist, algo, K, opt_iters, pop_size, member
                 print(f"Otsu error (K={K}): {e}")
                 thresholds = []
                 fe_val = None
-
-        # ===== MFWOA (single-task mode) =====
-        # Uses MFWOA_MULTITASK with single task (rmp_init=0.0 disables knowledge transfer)
         elif algo == 'mfwoa':
-            try:
-                from src.optim.mfwoa_multitask import mfwoa_multitask
-                # Run as single-task (T=1) with knowledge transfer disabled
-                print(f"  [MFWOA] K={K}: Running MFWOA_MULTITASK in single-task mode (rmp_init=0.0)")
-                thresholds_st, scores_st, _ = mfwoa_multitask(
-                    hists=[hist],
-                    Ks=[K],
-                    pop_size=used_pop_size,
-                    iters=used_iters,
-                    membership=membership,
-                    lambda_penalty=1.0,
-                    alpha_area=0.50,
-                    beta_membership=0.80,
-                    gamma_spacing=0.90,
-                    rmp_init=0.0,          # Single task: no cross-task transfer
-                    elitism=None,          # ✅ NEW: Adaptive elitism
-                    enable_mutation=True,  
-                    mutation_rate=0.10,    
-                )
-                thresholds = thresholds_st[0] if thresholds_st else []
-                fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
-                                                     lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
-            except Exception as e:
-                print(f"MFWOA error (K={K}): {e}")
-                thresholds = []
-                fe_val = None
+            # Skip single-task MFWOA - only run in multitask mode
+            print(f"  [MFWOA] K={K}: Skipping single-task, will be handled by multitask mode")
+            thresholds = []
+            fe_val = None
+        # # ===== MFWOA (single-task mode) =====
+        # # Uses MFWOA_MULTITASK with single task (rmp_init=0.0 disables knowledge transfer)
+        # elif algo == 'mfwoa':
+        #     try:
+        #         from src.optim.mfwoa_multitask import mfwoa_multitask
+        #         # Run as single-task (T=1) with knowledge transfer disabled
+        #         print(f"  [MFWOA] K={K}: Running MFWOA_MULTITASK in single-task mode (rmp_init=0.0)")
+        #         thresholds_st, scores_st, _ = mfwoa_multitask(
+        #             hists=[hist],
+        #             Ks=[K],
+        #             pop_size=used_pop_size,
+        #             iters=used_iters,
+        #             membership=membership,
+        #             lambda_penalty=1.0,
+        #             alpha_area=0.50,
+        #             beta_membership=0.80,
+        #             gamma_spacing=0.90,
+        #             rmp_init=0.0,          # Single task: no cross-task transfer
+        #             elitism=None,          # ✅ NEW: Adaptive elitism
+        #             enable_mutation=True,  
+        #             mutation_rate=0.05,    
+        #         )
+        #         thresholds = thresholds_st[0] if thresholds_st else []
+        #         fe_val = float(compute_fuzzy_entropy(hist, thresholds, membership=membership, for_minimization=False,
+        #                                              lambda_penalty=1.0, alpha_area=0.50, beta_membership=0.80, gamma_spacing=0.90))
+        #     except Exception as e:
+        #         print(f"MFWOA error (K={K}): {e}")
+        #         thresholds = []
+        #         fe_val = None
 
         # ===== WOA =====
         elif algo == 'woa':
@@ -637,9 +697,7 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
     for k_val in K_to_test:
         current_iters = UI_ITERS
         if ENABLE_ADAPTIVE_ITERS_BENCHMARK:
-            # ✅ NEW: Scale nhẹ hơn để tất cả algorithms có đủ thời gian
-            # OLD: K≥8 → 25%, K≥6 → 40%, K≥5 → 60%
-            # NEW: K≥10 → 60%, K≥8 → 70%, K≥6 → 80%
+           
             if k_val >= 10:
                 current_iters = max(100, int(UI_ITERS * 0.60))  # 60% (was 25%)
             elif k_val >= 8:
@@ -654,40 +712,132 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
     print(f"[START] Bat dau benchmark cho K trong {K_to_test} tren {len(selected_algos)} thuat toan...")
     print(f"  Adaptive iterations: {adaptive_iters}")
 
+
     # ===== MFWOA MULTITASK (nếu có) =====
     # Chạy MFWOA một lần với tất cả K để chuyển giao kiến thức
+    # mfwoa_multitask_results = {}
+    # if 'mfwoa' in selected_algos:
+    #     try:
+    #         print(f"\n  🔗 Chạy MFWOA Multitask cho tất cả K = {K_to_test}...")
+    #         from src.optim.mfwoa_multitask import mfwoa_multitask
+    #         import time as _time
+    #         start_mt = _time.perf_counter()
+            
+    #         # Prepare hists (same cho mỗi K vì cùng 1 ảnh)
+    #         hists_list = [hist] * len(K_to_test)
+            
+    #         # Dùng SỐ VÒNG LẶP TRUNG BÌNH của các K (fair cho multitask)
+    #         avg_iters = int(np.mean(list(adaptive_iters.values())))
+    #         print(f"    Using average adaptive iterations: {avg_iters} (from {adaptive_iters})")
+            
+    #         # Chạy MFWOA multitask (mỗi task ứng với 1 K)
+    #         thresholds_list, scores, diag = mfwoa_multitask(
+    #             hists=hists_list,
+    #             Ks=K_to_test,
+    #             pop_per_task=UI_POP,   # cùng pop với PSO/WOA
+    #             iters=avg_iters,        # dùng số vòng lặp trung bình
+    #             membership=membership,
+    #             lambda_penalty=1.0,
+    #             alpha_area=0.50,
+    #             beta_membership=0.80,
+    #             gamma_spacing=0.90,
+    #             rmp_init=0.3,          # cho phép chuyển giao tri thức giữa các K
+    #             elitism=int(0.05 * UI_POP),
+    #             enable_mutation=True,
+    #             mutation_rate=0.05,
+    #         )
+                        
+    #         print(f"    [DEBUG MT RETURN] len(thresholds_list)={len(thresholds_list)}, len(scores)={len(scores)}")
+            
+    #         time_mt = _time.perf_counter() - start_mt
+            
+    #         # Lưu lại kết quả theo từng K
+    #         for k_idx, k_val in enumerate(K_to_test):
+    #             if k_idx >= len(thresholds_list):
+    #                 continue
+
+    #             thr = thresholds_list[k_idx]
+                
+    #             # Tính lại FE với cùng cấu hình penalty như các thuật toán khác
+    #             if thr:
+    #                 fe_score = float(compute_fuzzy_entropy(
+    #                     hist, thr,
+    #                     membership=membership,
+    #                     for_minimization=False,
+    #                     lambda_penalty=1.0,
+    #                     alpha_area=0.50,
+    #                     beta_membership=0.80,
+    #                     gamma_spacing=0.90,
+    #                 ))
+    #             else:
+    #                 fe_score = None
+
+    #             # In chẩn đoán nếu diag là dict
+    #             if isinstance(diag, dict) and k_idx == 0:
+    #                 nfe = diag.get('nfe', 0)
+    #                 cross_task = diag.get('cross_task_count', 0)
+    #                 mutations = diag.get('mutation_count', 0)
+    #                 print(f"        [DIAG] NFE={nfe}, cross_task={cross_task}, mutations={mutations}")
+                
+    #             mfwoa_multitask_results[k_val] = {
+    #                 'thresholds': thr,
+    #                 'fe': fe_score,
+    #                 'time': time_mt / len(K_to_test),  # chia đều thời gian cho từng K
+    #                 'iters': avg_iters                 # lưu số vòng lặp đã dùng
+    #             }
+    #             fe_log = f"{fe_score:.6f}" if fe_score is not None else "N/A"
+    #             print(f"      [DEBUG] mfwoa_K{k_val}: thresholds={thr}, FE_final={fe_log}")
+            
+    #         print(f"    [OK] MFWOA Multitask hoàn tất (tổng time={time_mt:.2f}s)")
+    #     except Exception as e:
+    #         print(f"    [WARN] MFWOA Multitask không khả dụng: {e}, fallback to single-task")
+    # ===== MFWOA MULTITASK (nếu có) =====
+    # ✅ MFWOA LUÔN chạy multitask mode cho TẤT CẢ K
     mfwoa_multitask_results = {}
     if 'mfwoa' in selected_algos:
         try:
-            print(f"\n  🔗 Chạy MFWOA Multitask cho tất cả K = {K_to_test}...")
+            print(f"\n  🔗 [MFWOA MULTITASK] Chạy cho tất cả K = {K_to_test}...")
             from src.optim.mfwoa_multitask import mfwoa_multitask
             import time as _time
             start_mt = _time.perf_counter()
             
-            # Prepare hists (same cho mỗi K vì cùng 1 ảnh)
+            # Prepare hists (same for all K since same image)
             hists_list = [hist] * len(K_to_test)
             
-            # Dùng SỐ VÒNG LẶP TRUNG BÌNH của các K (fair cho multitask)
-            avg_iters = int(np.mean(list(adaptive_iters.values())))
-            print(f"    Using average adaptive iterations: {avg_iters} (from {adaptive_iters})")
+            # ✅ FIX: Dùng MEDIAN iterations (thay vì mean) để cân bằng K nhỏ và lớn
+            # Median giúp tránh bias từ K cực lớn (K=10 với 60% iters)
+            iters_values = list(adaptive_iters.values())
+            median_iters = int(np.median(iters_values))
+            # if len(K_to_test) >= 5:
+            #     # Multitask với nhiều tasks cần thêm iterations
+            #     median_iters = max(median_iters, 200)  # Minimum 200 iters
+            #     print(f"    Boosted iterations for multitask: {median_iters}")
+
+            print(f"    Using MEDIAN adaptive iterations: {median_iters} (from {adaptive_iters})")
+            
+            # ✅ CRITICAL FIX: Tăng pop_per_task để đủ diversity cho multitask
+            # Paper recommendation: pop_size = 100-200 per task for good knowledge transfer
+            pop_per_task_mt = max(4, UI_POP * max(K_to_test))  # at least double the single-task pop
+            print(f"    Population: {pop_per_task_mt} per task × {len(K_to_test)} tasks = {pop_per_task_mt * len(K_to_test)} total")
             
             # Chạy MFWOA multitask (mỗi task ứng với 1 K)
             thresholds_list, scores, diag = mfwoa_multitask(
                 hists=hists_list,
                 Ks=K_to_test,
-                pop_per_task=UI_POP,   # cùng pop với PSO/WOA
-                iters=avg_iters,        # dùng số vòng lặp trung bình
+                pop_per_task=pop_per_task_mt,  # ✅ Tăng population
+                iters=UI_ITERS,             # ✅ Dùng median thay vì mean
                 membership=membership,
                 lambda_penalty=1.0,
                 alpha_area=0.50,
                 beta_membership=0.80,
                 gamma_spacing=0.90,
-                rmp_init=0.3,          # cho phép chuyển giao tri thức giữa các K
-                elitism=None,
+                rmp_init=0.3,          # ✅ Enable knowledge transfer
+                elitism=None,          # ✅ Auto-compute: 5% of pop_size
                 enable_mutation=True,
-                mutation_rate=0.10,
+                mutation_rate=0.1,     # ✅ FIX: Paper uses 0.1, not 0.05
+                verbose=True,          # ✅ Enable logging
             )
-                        
+            
             print(f"    [DEBUG MT RETURN] len(thresholds_list)={len(thresholds_list)}, len(scores)={len(scores)}")
             
             time_mt = _time.perf_counter() - start_mt
@@ -695,6 +845,7 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
             # Lưu lại kết quả theo từng K
             for k_idx, k_val in enumerate(K_to_test):
                 if k_idx >= len(thresholds_list):
+                    print(f"    [WARN] Missing result for K={k_val} (idx={k_idx})")
                     continue
 
                 thr = thresholds_list[k_idx]
@@ -724,15 +875,20 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
                     'thresholds': thr,
                     'fe': fe_score,
                     'time': time_mt / len(K_to_test),  # chia đều thời gian cho từng K
-                    'iters': avg_iters                 # lưu số vòng lặp đã dùng
+                    'iters': median_iters              # lưu số vòng lặp đã dùng
                 }
                 fe_log = f"{fe_score:.6f}" if fe_score is not None else "N/A"
-                print(f"      [DEBUG] mfwoa_K{k_val}: thresholds={thr}, FE_final={fe_log}")
+                print(f"      [K={k_val}] MFWOA: thresholds={thr}, FE={fe_log}")
             
-            print(f"    [OK] MFWOA Multitask hoàn tất (tổng time={time_mt:.2f}s)")
+            print(f"    [OK] MFWOA Multitask hoàn tất (total time={time_mt:.2f}s, avg={time_mt/len(K_to_test):.2f}s per K)")
+        
         except Exception as e:
-            print(f"    [WARN] MFWOA Multitask không khả dụng: {e}, fallback to single-task")
-
+            print(f"    [ERROR] MFWOA Multitask failed: {e}")
+            import traceback
+            traceback.print_exc()
+            # ❌ Không fallback sang single-task nữa
+            print(f"    [CRITICAL] MFWOA requires multitask mode - skipping all K values")
+            mfwoa_multitask_results = {}
     # VÒNG LẶP BENCHMARK CHO TỪNG K
     for k_val in K_to_test:
         print(f"\n  Đang chạy benchmark cho K={k_val}...")
@@ -754,7 +910,7 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
                     'thresholds': thr_list,
                     'fe': mt_res['fe'],
                     'time': mt_res['time'],
-                    'opt_iters': current_iters,   # vẫn báo cáo theo adaptive_iters của K
+                    'opt_iters': UI_ITERS,   # vẫn báo cáo theo adaptive_iters của K
                     'K': k_val,
                     'seg_labels': apply_thresholds_to_image(pil_image, thr_list) if thr_list else None
                 }
@@ -769,7 +925,7 @@ def run_algorithms_and_benchmark(pil_image, hist, membership, selected_algos, op
                 hist=hist,
                 algo=algo,
                 K=k_val,
-                opt_iters=current_iters,
+                opt_iters=UI_ITERS,
                 pop_size=UI_POP,
                 membership=membership
             )
@@ -837,31 +993,6 @@ def compute():
     # ===== FIXED vs ADAPTIVE ITERATIONS =====
     # ENABLE_ADAPTIVE_ITERS = False: Disable adaptive, use fixed iterations for all K
     # ENABLE_ADAPTIVE_ITERS = True: Enable adaptive iterations (scale down with higher K)
-    ENABLE_ADAPTIVE_ITERS = False  # Set to False to use exact iterations you input
-    
-    if ENABLE_ADAPTIVE_ITERS:
-    # ✅ NEW: Scale nhẹ hơn để MFWOA có đủ thời gian converge
-    # OLD: K≥8 → 25%, K≥6 → 40%, K≥5 → 60%
-    # NEW: K≥10 → 60%, K≥8 → 70%, K≥6 → 80%
-        if n_thresholds >= 10:
-            # K=10: 200*0.6 = 120 iters (thay vì 50)
-            opt_iters = max(100, int(opt_iters * 0.60))  # 60% iterations
-            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (60%)")
-        elif n_thresholds >= 8:
-            # K=8-9: 200*0.7 = 140 iters (thay vì 50)
-            opt_iters = max(120, int(opt_iters * 0.70))  # 70% iterations
-            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (70%)")
-        elif n_thresholds >= 6:
-            # K=6-7: 200*0.8 = 160 iters (thay vì 80)
-            opt_iters = max(140, int(opt_iters * 0.80))  # 80% iterations
-            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (80%)")
-        elif n_thresholds >= 5:
-            # K=5: 200*0.9 = 180 iters (thay vì 120)
-            opt_iters = max(160, int(opt_iters * 0.90))  # 90% iterations
-            print(f"  [ADAPTIVE] K={n_thresholds}: scaled iters to {opt_iters} (90%)")
-        # K≤4: giữ 100%
-    else:
-        print(f"  [FIXED ITERS] Using user-specified iterations: {opt_iters}")
 
     # Parse optimization mode (single vs multitask)
     optimization_mode = request.form.get("optimization_mode", "single").strip().lower()
@@ -896,17 +1027,6 @@ def compute():
 
     # compute histogram
     hist = image_to_histogram(pil)
-
-    # If no GT provided and benchmark requested, create a neutral binary GT at midpoint
-    # This ensures DICE is computed for all algorithms (neutral baseline, not Otsu-derived)
-    if gt_labels is None and benchmark:
-        try:
-            arr = np.array(pil.convert('L'))
-            gt_labels = (arr >= 128).astype(np.uint8) * 255
-            print(f"Auto-generated neutral GT (threshold=128), shape={gt_labels.shape}")
-        except Exception as e:
-            print(f"Failed to auto-generate GT: {e}")
-            gt_labels = None
 
     # if benchmark requested -> run multiple algos; else run selected single mode
     if benchmark:
@@ -948,18 +1068,18 @@ def compute():
                     else:
                         psnr, ssim = compute_psnr_ssim(pil, seg)
                         if gt_labels is None:
-                            fsim_score = None
+                            # Không có GT: dùng FSIM giữa ảnh gốc và ảnh tái tạo từ segmentation
+                            fsim_score = compute_fsim_original(pil, seg)
                         else:
                             # Ensure GT and segmentation have same size
                             if seg.shape != gt_labels.shape:
-                                print(f"Shape mismatch: seg {seg.shape} vs gt {gt_labels.shape}")
-                                # Try to resize GT if needed
                                 try:
                                     from PIL import Image as PILImage
-                                    gt_pil_temp = PILImage.fromarray(gt_labels).resize(seg.shape[::-1], resample=PILImage.NEAREST)
-                                    gt_resized = np.array(gt_pil_temp)
+                                    gt_pil = PILImage.fromarray(gt_labels.astype(np.uint8))
+                                    gt_pil = gt_pil.resize(pil.size, resample=PILImage.NEAREST)
+                                    gt_resized = np.array(gt_pil, dtype=np.uint8)
                                     fsim_score = compute_fsim(seg, gt_resized)
-                                except:
+                                except Exception:
                                     fsim_score = None
                             else:
                                 fsim_score = compute_fsim(seg, gt_labels)

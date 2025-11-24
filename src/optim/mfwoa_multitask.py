@@ -1,6 +1,9 @@
-
+"""
+MFWOA with optimized single-task mode
+======================================
+Detect T=1 and skip all multitask overhead
+"""
 from __future__ import annotations
-
 import numpy as np
 from typing import List, Sequence, Tuple
 
@@ -11,432 +14,483 @@ EPS = 1e-12
 
 
 def continuous_to_thresholds(pos: np.ndarray, K: int) -> List[int]:
-    """Convert continuous position to discrete thresholds using standard constraint enforcement.
-    
-    Hàm chuyển đổi vị trí liên tục (từ optimizer) thành danh sách ngưỡng rời rạc (int).
-    Dùng enforce_threshold_constraints để đảm bảo consistency với other optimizers.
-    
-    Args:
-        pos: Continuous position vector (numpy array)
-        K: Number of thresholds (số ngưỡng cần lấy từ vị trí)
-    
-    Returns:
-        List of integer thresholds (đã constraint, sorted, enforced gap)
-    """
-    # Lấy K phần tử đầu từ vị trí
+    """Convert continuous position to discrete thresholds."""
     arr = pos[:K]
-    # Sử dụng enforce_threshold_constraints từ seg/utils để đảm bảo:
-    # - Nằm trong [1, 254]
-    # - Sắp xếp tăng dần
-    # - Khoảng cách tối thiểu giữa các ngưỡng
-    # - Không trùng
     constrained = enforce_threshold_constraints(np.round(arr).astype(np.int32))
-    # Chuyển thành list int
     return [int(x) for x in constrained]
+
+
+def sbx_crossover(p1: np.ndarray, p2: np.ndarray, rng: np.random.Generator, 
+                  eta: float = 2.0, pc: float = 0.9) -> Tuple[np.ndarray, np.ndarray]:
+    """Simulated Binary Crossover (SBX)."""
+    c1, c2 = p1.copy(), p2.copy()
+    for i in range(len(p1)):
+        if rng.random() < pc:
+            if abs(p1[i] - p2[i]) > EPS:
+                u = rng.random()
+                if u <= 0.5:
+                    beta = (2 * u) ** (1 / (eta + 1))
+                else:
+                    beta = (1 / (2 * (1 - u))) ** (1 / (eta + 1))
+                c1[i] = 0.5 * ((1 + beta) * p1[i] + (1 - beta) * p2[i])
+                c2[i] = 0.5 * ((1 - beta) * p1[i] + (1 + beta) * p2[i])
+    return c1, c2
+
+
+def gaussian_mutation(ind: np.ndarray, rng: np.random.Generator, 
+                      pm: float = 0.15, sigma: float = 10.0,
+                      lb: float = 1.0, ub: float = 254.0) -> np.ndarray:
+    """Gaussian mutation."""
+    mutant = ind.copy()
+    for i in range(len(ind)):
+        if rng.random() < pm:
+            mutant[i] += sigma * rng.standard_normal()
+    return np.clip(mutant, lb, ub)
+
+
+def update_factorial_ranks(factorial_costs: np.ndarray, T: int) -> np.ndarray:
+    """Update factorial ranks (only for T > 1)."""
+    pop_size = factorial_costs.shape[0]
+    factorial_ranks = np.zeros_like(factorial_costs, dtype=int)
+    
+    for t in range(T):
+        valid_mask = factorial_costs[:, t] < np.inf
+        if np.any(valid_mask):
+            valid_costs = factorial_costs[valid_mask, t]
+            order = np.argsort(valid_costs)
+            ranks = np.full(pop_size, pop_size + 1, dtype=int)
+            valid_indices = np.where(valid_mask)[0]
+            ranks[valid_indices[order]] = np.arange(1, len(order) + 1)
+            factorial_ranks[:, t] = ranks
+        else:
+            factorial_ranks[:, t] = pop_size + 1
+    
+    return factorial_ranks
+
+
+# def mfwoa_single_task_fast(
+#     hist: np.ndarray,
+#     K: int,
+#     pop_size: int,
+#     iters: int,
+#     rng: np.random.Generator,
+#     membership: str,
+#     lambda_penalty: float,
+#     alpha_area: float,
+#     beta_membership: float,
+#     gamma_spacing: float,
+#     verbose: bool,
+# ) -> Tuple[List[int], float]:
+#     """
+#     Fast single-task WOA (no multitask overhead).
+#     Pure WOA with greedy selection.
+#     """
+#     # Objective function
+#     def objective(pos: np.ndarray) -> float:
+#         try:
+#             thr = continuous_to_thresholds(pos, K)
+#             fe_val = compute_fuzzy_entropy(
+#                 hist, thr, membership=membership, for_minimization=False,
+#                 lambda_penalty=lambda_penalty, alpha_area=alpha_area,
+#                 beta_membership=beta_membership, gamma_spacing=gamma_spacing,
+#             )
+#             return -float(fe_val)
+#         except:
+#             return 1e9
+    
+#     # Initialize population
+#     pop = rng.uniform(1.0, 254.0, size=(pop_size, K))
+#     fitness = np.full(pop_size, np.inf)
+    
+#     # Initial evaluation
+#     for i in range(pop_size):
+#         fitness[i] = objective(pop[i])
+    
+#     best_idx = int(np.argmin(fitness))
+#     best_pos = pop[best_idx].copy()
+#     best_score = fitness[best_idx]
+    
+#     if verbose:
+#         fe_val = -best_score
+#         print(f"[MFWOA-FAST] Initial FE: {fe_val:.6f}")
+    
+#     # Main loop (pure WOA with greedy)
+#     for g in range(iters):
+#         a = 2.0 - 2.0 * g / max(iters - 1, 1)
+        
+#         for i in range(pop_size):
+#             Xi = pop[i].copy()
+            
+#             r1, r2 = rng.random(), rng.random()
+#             A = 2.0 * a * r1 - a
+#             C = 2.0 * r2
+#             p = rng.random()
+#             l = rng.uniform(-1.0, 1.0)
+#             b = 1.0
+            
+#             # WOA position update
+#             if p < 0.5:
+#                 if abs(A) < 1.0:
+#                     D = np.abs(C * best_pos - Xi)
+#                     new_pos = best_pos - A * D
+#                 else:
+#                     rand_idx = rng.integers(pop_size)
+#                     X_rand = pop[rand_idx]
+#                     D = np.abs(C * X_rand - Xi)
+#                     new_pos = X_rand - A * D
+#             else:
+#                 D_prime = np.abs(best_pos - Xi)
+#                 new_pos = D_prime * np.exp(b * l) * np.cos(2 * np.pi * l) + best_pos
+            
+#             new_pos = np.clip(new_pos, 1.0, 254.0)
+            
+#             # Greedy selection
+#             new_score = objective(new_pos)
+#             if new_score < fitness[i]:
+#                 pop[i] = new_pos
+#                 fitness[i] = new_score
+                
+#                 if new_score < best_score:
+#                     best_score = new_score
+#                     best_pos = new_pos.copy()
+    
+#     if verbose:
+#         fe_val = -best_score
+#         print(f"[MFWOA-FAST] Final FE: {fe_val:.6f}")
+    
+#     thr = continuous_to_thresholds(best_pos, K)
+#     fe = -float(best_score)
+#     return thr, fe
 
 
 def mfwoa_multitask(
     hists: Sequence[np.ndarray],
     Ks: Sequence[int],
-    pop_size: int = 100,
-    iters: int = 500,
+    pop_size :int = None,
+    iters: int = None,
     rng: np.random.Generator = None,
     rmp_init: float = 0.3,
     pop_per_task: int = None,
-    elitism: int = None,  #  Make adaptive
-    rmp_schedule: Sequence[tuple] = None,
     membership: str = "triangular",
     lambda_penalty: float = 1.0,
     alpha_area: float = 0.10,
     beta_membership: float = 0.10,
     gamma_spacing: float = 0.20,
-    enable_mutation: bool = True,  # Enable mutation by default
-    mutation_rate: float = 0.10,  #  10% mutation chance
+    pc: float = 0.9,
+    pm: float = 0.15,
+    elitism: int = None,
+    enable_mutation: bool = True,
+    mutation_rate: float = 0.2,
+    rmp_schedule: Sequence[tuple] = None,
+    verbose: bool = True,
+    log_interval: int = 50,
+    greedy_selection: bool = False,
+    acceptance_threshold: float = 0.05,
 ) -> Tuple[List[List[int]], List[float], dict]:
-    """Run simplified MFWOA for multiple tasks simultaneously.
+    """
+    MFWOA with optimized single-task detection.
     
-    ===== MULTITASK MFWOA: Knowledge Transfer + Adaptive RMP + CRITICAL=====
-    
-    Thuật toán:
-    1. Khởi tạo quần thể gộp (pop_size cá thể) được chia cho T tasks
-    2. Mỗi cá thể được gán skill_factor ∈ {0..T-1} (assigned task)
-    3. Mỗi iteration: cập nhật cá thể dựa vào WOA mechanics + knowledge transfer (cross-task)
-    4. rmp (cross-task rate) được adjust dựa trên thành công
-    5. Trả về best_thresholds cho mỗi task
-
-    Args:
-        hists: sequence of histograms (one per task). For same image multiple Ks, pass same hist repeated.
-        Ks: sequence of ints number of thresholds per task.
-        pop_size: Total population size (chia cho T tasks)
-        iters: Number of iterations
-        rng: Random number generator (seed cho reproducibility)
-        rmp_init: Initial cross-task rate (0.3 = 30% cross-task updates)
-        pop_per_task: Nếu set, tính pop_size = pop_per_task * T (override pop_size param)
-        elitism: Number of elite individuals per task to preserve (None = adaptive)
-        rmp_schedule: Optional schedule [(start_frac, end_frac, rmp_value), ...]
-        membership: Membership function type cho compute_fuzzy_entropy (triangular/gaussian/s)
-        lambda_penalty: Weighting factor cho penalizer
-        alpha_area: Weight cho P_A penalty (cân bằng kích thước lớp)
-        beta_membership: Weight cho P_μ penalty (tránh concentrated membership)
-        gamma_spacing: Weight cho P_spacing penalty (enforce even distribution)
-        enable_mutation: Enable mutation operator for diversity (default True)
-        mutation_rate: Probability of mutation per individual (default 0.10)
-    
-    Returns:
-        (best_thresholds_per_task, best_scores_per_task, diagnostics)
+    âœ… NEW: Auto-detect T=1 and use fast single-task mode
     """
     if rng is None:
-        rng = np.random.default_rng(123)
+        rng = np.random.default_rng(42)
+
     T = len(Ks)
-    maxK = max(Ks)
+    if T == 0:
+        print("[MFWOA] ERROR: No tasks provided (T=0)")
+        return [], [], {"history": {}, "nfe": 0, "cross_task_count": 0}
+
+    # âœ… NEW: Fast path for single-task
+    if T == 0:
+        print("[MFWOA] ERROR: No tasks provided (T=0)")
+        return [], [], {"history": {}, "nfe": 0, "cross_task_count": 0}
     
-    # allow specifying population per task; if provided, scale total pop
-    if pop_per_task is not None:
+    if T == 1:
+        print("[MFWOA] WARNING: T=1 detected, but running full multitask pipeline")
+
+    # ===== MULTITASK MODE (T > 1) =====
+    maxK = int(max(Ks))
+    if pop_per_task is not None and pop_per_task > 0:
         pop_size = int(pop_per_task) * T
-    
-    # ===== ADAPTIVE ELITISM =====
+    pop_size = max(int(pop_size), T)
+
     if elitism is None:
-        # Scale elitism with max(K):
-        # - K=2-4: 5-6 elites
-        # - K=5-7: 8-10 elites
-        # - K=8-10: 12-15 elites
-        # Formula: min(15% of pop, max(5, 1.5*maxK))
-        elitism = min(int(pop_size * 0.15), max(5, int(maxK * 1.5)))
-    
-    print(f"  [MFWOA-MT] T={T} tasks, pop_size={pop_size}, iters={iters}, rmp_init={rmp_init}")
-    print(f"  Adaptive elitism={elitism} (scaled with maxK={maxK})")
-    print(f"  Mutation={'ENABLED' if enable_mutation else 'DISABLED'} (rate={mutation_rate})")
-    
-    # ===== OBJECTIVES PER TASK: Sử dụng same penalties như app.py =====
-    # compute_fuzzy_entropy(hist, thresholds, membership, for_minimization=False,
-    #                       lambda_penalty, alpha_area, beta_membership, gamma_spacing)
-    # 
-    # ⚠️  IMPORTANT: MFWOA is a MINIMIZER (like WOA/PSO), so objectives should return -FE
-    # to be consistent with other optimizers. WOA negates FE before passing to minimizer:
-    #   objective(pos) returns -FE, and WOA minimizes -FE to maximize FE.
-    # We do the same here for consistency.
-    def make_obj(hist, K):
-        def obj_task(pos):
-            """Objective function: minimize -FE (equivalent to maximizing FE) with penalties
-        
-            """
-            thr = continuous_to_thresholds(pos, K)
-            fe_val = compute_fuzzy_entropy(
-                hist, thr, 
-                membership=membership,
-                for_minimization=False,
-                lambda_penalty=lambda_penalty,
-                alpha_area=alpha_area,
-                beta_membership=beta_membership,
-                gamma_spacing=gamma_spacing,
-            )
-            # Negate to convert maximization (FE) to minimization (-FE)
-            # This matches WOA's approach: minimize -FE instead of maximize FE
-            return -float(fe_val)
+        elitism = max(1, int(0.05 * pop_size))
+
+    if verbose == True:
+        print("=" * 60)
+        print("[MFWOA-MULTITASK] INITIALIZATION")
+        print("=" * 60)
+        print(f"  Tasks: {T}, Dims: {list(Ks)}, Pop: {pop_size}, Iters: {iters}")
+        print(f"  RMP: {rmp_init}, Greedy: {greedy_selection}")
+        print("=" * 60)
+
+    # Objective functions
+    def make_obj(hist, K, task_id):
+        def obj_task(pos: np.ndarray) -> float:
+            try:
+                thr = continuous_to_thresholds(pos, K)
+                fe_val = compute_fuzzy_entropy(
+                    hist, thr, membership=membership, for_minimization=False,
+                    lambda_penalty=lambda_penalty, alpha_area=alpha_area,
+                    beta_membership=beta_membership, gamma_spacing=gamma_spacing,
+                )
+                return -float(fe_val)
+            except:
+                return 1e9
         return obj_task
-    
-    objectives = [make_obj(h, K) for h, K in zip(hists, Ks)]
 
-    # ===== INITIALIZE POPULATION =====
-    #  Initialize as CONTINUOUS float (not rounded)
-    pop = rng.uniform(0.0, 255.0, size=(pop_size, maxK))
-    skill_factors = rng.integers(low=0, high=T, size=pop_size)
-    fitness = np.full(pop_size, np.inf)  # ⚠️ CHANGED: initialize to +inf for MINIMIZATION
-    
-    # evaluate initial
-    for i in range(pop_size):
-        sf = int(skill_factors[i])
-        fitness[i] = objectives[sf](pop[i])
-    
-    # best per task
-    best_pos = [None] * T
-    best_score = [np.inf] * T  # ⚠️ CHANGED: initialize to +inf for MINIMIZATION
-    
-    # Ensure at least one individual per task: if any task has zero, assign by round-robin
-    counts = np.bincount(skill_factors, minlength=T)
-    if np.any(counts == 0):
-        # assign indices round-robin to ensure at least one per task
-        for i in range(pop_size):
-            skill_factors[i] = i % T
-        # ===== RECALCULATE FITNESS AFTER REALLOCATION =====
-        # Khi thay đổi skill_factors, PHẢI tính lại fitness cho từng cá thể theo assigned task
-        # Không làm bước này, cá thể sẽ có fitness từ task cũ (sai!)
-        for i in range(pop_size):
-            sf = int(skill_factors[i])
-            fitness[i] = objectives[sf](pop[i])
+    objectives = [make_obj(h, K, t) for t, (h, K) in enumerate(zip(hists, Ks))]
 
-    for t in range(T):
-        mask = (skill_factors == t)
-        if mask.any():
-            # ⚠️ CHANGED: compute MINIMUM instead of MAXIMUM (argmin instead of argmax)
-            # Because objectives now return -FE (negated) and we minimize
-            masked = np.where(mask, fitness, np.inf)
-            idx = int(np.argmin(masked))
-            best_pos[t] = pop[idx].copy()
-            best_score[t] = float(fitness[idx])
-
-    rmp = float(rmp_init)
-    cross_task_count = 0  # DEBUG: track cross-task transfers
-    mutation_count = 0  
-
-    # history logging
-    history = {t: [] for t in range(T)}
+    # Initialize population
+    pop = rng.uniform(1.0, 254.0, size=(pop_size, maxK))
+    
+    # Initial evaluation
+    factorial_costs = np.full((pop_size, T), np.inf, dtype=float)
     nfe = 0
+    
+    for i in range(pop_size):
+        for t in range(T):
+            factorial_costs[i, t] = objectives[t](pop[i])
+            nfe += 1
 
-    # Track best_score per task from PREVIOUS iteration (for Algorithm 2 RMP update)
+    # Initial ranks and skill factors
+    factorial_ranks = update_factorial_ranks(factorial_costs, T)
+    skill_factors = np.argmin(factorial_ranks, axis=1)
+
+    # Initialize best solutions
+    best_pos: List[np.ndarray] = [None] * T
+    best_score = np.full(T, np.inf, dtype=float)
+    
+    for t in range(T):
+        valid_mask = factorial_costs[:, t] < np.inf
+        if np.any(valid_mask):
+            valid_costs = factorial_costs[valid_mask, t]
+            best_idx = np.where(valid_mask)[0][int(np.argmin(valid_costs))]
+            best_score[t] = float(factorial_costs[best_idx, t])
+            best_pos[t] = pop[best_idx].copy()
+
+    # Tracking
+    fitness = factorial_costs[np.arange(pop_size), skill_factors].copy()
+    rmp = float(rmp_init)
+    cross_task_count = 0
+    mutation_count = 0
     best_score_prev = best_score.copy()
+    history = {t: [best_score[t]] for t in range(T)}
+    improvements_per_iter = []
+    stagnation_counter = 0
 
-    # Count individuals per task
-    counts = np.bincount(skill_factors, minlength=T)
-    counts_str = ", ".join([f"K{Ks[t]}:{counts[t]}" for t in range(T)])
-    print(f"    Population distribution: {counts_str} (total={pop_size})")
-    # Show initial best per task
-    x_best_str = ", ".join([f"K{Ks[t]}:FE={-best_score[t]:.4f}" for t in range(T)])
-    print(f"    Initial X-best per task: {x_best_str}")
-    print(f"    RMP (cross-task rate) = {rmp:.3f} (0.0=no transfer, 1.0=all cross-task)")
-
+    # ===== MAIN MULTITASK LOOP =====
     for g in range(iters):
-        frac = g / max(1, iters)
-        a = 2.0 * (1 - g / max(1, iters - 1))
+        a = 2.0 - 2.0 * g / max(iters - 1, 1)
         
-        # ===== ALGORITHM 2: RMP UPDATE (Lines 12-15) =====
-        # Check if ANY task improved since previous iteration
-        # If NO task improved: rmp = rmp + δN(0,1) with δ=0.1
-        # If ANY task improved: rmp stays same
+        iter_improvements = 0
+        
+        # Adaptive RMP
         if g > 0:
-            task_improved = any(best_score[t] < best_score_prev[t] for t in range(T))
-            if not task_improved:
-                # No task improved -> update RMP by Gaussian noise
+            # Check if ALL tasks are stagnant
+            all_stagnant = np.all(best_score >= best_score_prev - EPS)
+            
+            if all_stagnant:
+                # Add Gaussian noise (paper: δ=0.1)
                 delta = 0.1
-                gaussian_noise = rng.normal(0, 1)  # N(0,1)
-                rmp = float(np.clip(rmp + delta * gaussian_noise, 0.0, 1.0))
-        
-        # If custom schedule provided, override
-        if rmp_schedule is not None:
-            for (s_frac, e_frac, val) in rmp_schedule:
-                if frac >= s_frac and frac < e_frac:
-                    rmp = float(val)
-                    break
-        
-        # If single-task, force rmp to zero
-        rmp_local = 0.0 if T == 1 else rmp
-
-        # Prepare next generation container (we will allow elitism preservation)
-        next_pop = pop.copy()
-        
-        # ===== PRE-COMPUTE A (Whale coefficient) FOR THIS ITERATION =====
-        # A determines if this is Encircle/Attack (|A| < 1) or Search for prey (|A| ≥ 1)
-        r1_main = rng.random()
-        A_main = 2 * a * r1_main - a  # Global A for this iteration
+                noise = delta * rng.standard_normal()
+                rmp = np.clip(rmp + noise, 0.0, 1.0)
+                
+                if verbose == True:
+                # In ra g (vòng lặp) và rmp hiện tại bất kể có bị stagnant hay không
+                    print(f"  [Iter {g}/{iters}] RMP: {rmp:.4f}")
+                    # Lặp qua từng task (từng K) để in chi tiết
+                    for t in range(T):
+                        k_val = Ks[t]
+                        
+                        # 1. Lấy FE (Lưu ý: thuật toán đang tìm Min(-FE), nên cần đổi dấu lại thành dương)
+                        if best_score[t] < 1e9:
+                            current_fe = -best_score[t] 
+                        else:
+                            current_fe = 0.0
+                        
+                        # 2. Lấy Thresholds (Ngưỡng) hiện tại
+                        if best_pos[t] is not None:
+                            # Gọi hàm helper có sẵn đầu file để chuyển sang số nguyên
+                            curr_thr = continuous_to_thresholds(best_pos[t], k_val)
+                        else:
+                            curr_thr = []
+                        
+                        # 3. Xuất ra màn hình (Mỗi K một dòng để dễ nhìn như bạn muốn)
+                        print(f"   [K={k_val}] FE: {current_fe:.6f} | Thr: {curr_thr}")
+            
+            # Update prev scores for next iteration
+            best_score_prev = best_score.copy()
 
         for i in range(pop_size):
-            sf = int(skill_factors[i])
-            
-            # ===== ALGORITHM 3: KNOWLEDGE TRANSFER =====
-            rand_i1 = rng.random()  # For cross-task decision
-            rand_i2 = rng.random()  # For WOA method selection
-            rand_i3 = rng.random()  # For mutation
-            rand_i4 = rng.random()  # For skill factor change
-            
-            if rand_i1 < rmp_local:  # Inter-task knowledge transfer (Algorithm 3, Step 2-20)
-                # Step 3: Randomly select one other task
-                other_tasks = [t for t in range(T) if t != sf]
-                if other_tasks:
-                    other_task = rng.choice(other_tasks)
-                    
-                    # Step 4: Randomly select a learned individual from other task
-                    other_mask = (skill_factors == other_task)
-                    if np.count_nonzero(other_mask) > 0:
-                        other_indices = np.where(other_mask)[0]
-                        j_idx = rng.choice(other_indices)
-                        X_j = pop[j_idx]
-                    else:
-                        X_j = best_pos[other_task]
-                    
-                    # Step 5-18: Choose method (first way or second way)
-                    if rand_i2 < 0.2:  # First way: traditional WOA
-                        leader = best_pos[sf]
-                        r1 = rng.random()
-                        r2 = rng.random()
-                        A = 2 * a * r1 - a
-                        C = 2 * r2
-                        p = rng.random()
-                        
-                        if p < 0.5:
-                            if abs(A) < 1:  # Encircling prey
-                                D1 = abs(C * leader - pop[i])
-                                D_other = abs(C * best_pos[other_task] - X_j)
-                                new_pos = leader - A * (D1 + D_other) / 2.0
-                            else:  # Search for prey
-                                X_rand = pop[rng.integers(pop_size)]
-                                D2 = abs(C * X_rand - pop[i])
-                                other_pop_idxs = np.where(skill_factors == other_task)[0]
-                                if len(other_pop_idxs) >= 2:
-                                    X_j1 = pop[rng.choice(other_pop_idxs)]
-                                    X_j2 = pop[rng.choice(other_pop_idxs)]
-                                elif len(other_pop_idxs) == 1:
-                                    X_j1 = pop[other_pop_idxs[0]]
-                                    X_j2 = best_pos[other_task]
-                                else:
-                                    X_j1 = best_pos[other_task]
-                                    X_j2 = best_pos[other_task]
-                                D_other = abs(C * X_j1 - X_j2)
-                                new_pos = X_rand - A * (D2 + D_other) / 2.0
-                        else:  # Bubble-net attack
-                            b = 2.5
-                            l = rng.uniform(-1, 1)
-                            D_prime = abs(leader - pop[i])
-                            D_other = abs(C * best_pos[other_task] - X_j)
-                            new_pos = ((D_prime + D_other) / 2.0) * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
-                    else:  # Second way: crossover + mutation
-                        # Step 14-15: Crossover
-                        X_rand_k = pop[rng.integers(pop_size)]
-                        X_rand_new = (X_rand_k + X_j) / 2.0  # Crossover
-                        X_best_new = (best_pos[sf] + best_pos[other_task]) / 2.0
-                        
-                        # Step 16-18: Mutation
-                        if rand_i3 < 0.1:
-                            n_mut = rng.integers(1, min(3, maxK + 1))
-                            mut_dims = rng.choice(maxK, n_mut, replace=False)
-                            for d in mut_dims:
-                                X_rand_new[d] = rng.uniform(1.0, 254.0)
-                                X_best_new[d] = rng.uniform(1.0, 254.0)
-                            mutation_count += 1
-                        
-                        # Step 19: Use best as new position
-                        new_pos = X_best_new
-                    
-                    # Step 20-21: Potentially change skill factor
-                    if rand_i4 < 0.5:
-                        skill_factors[i] = other_task
-                        sf = other_task
-                    
-                    cross_task_count += 1
-                else:
-                    # Fallback: standard WOA
-                    leader = best_pos[sf]
-                    r1 = rng.random()
-                    r2 = rng.random()
-                    A = 2 * a * r1 - a
-                    C = 2 * r2
-                    p = rng.random()
+            k = int(skill_factors[i])
+            Xi = pop[i].copy()
+
+            rand1, rand2, rand3, rand4 = rng.random(4)
+            r1, r2 = rng.random(), rng.random()
+            A = 2.0 * a * r1 - a
+            C = 2.0 * r2
+            p = rng.random()
+            l = rng.uniform(-1.0, 1.0)
+            b = 1.0
+
+            new_pos = Xi.copy()
+            new_skill = k
+
+            # ===== INTER-TASK OR INNER-TASK =====
+            if rand1 < rmp:
+                # ===== INTER-TASK KNOWLEDGE TRANSFER =====
+                cross_task_count += 1
+                
+                # Random select other task (NO similarity filtering)
+                other_tasks = [tt for tt in range(T) if tt != k]
+                j = int(rng.choice(other_tasks))
+                
+                # Select individual from task j
+                idx_j_cands = np.where(skill_factors == j)[0]
+                X_j = pop[int(rng.choice(idx_j_cands))] if len(idx_j_cands) > 0 else \
+                      (best_pos[j] if best_pos[j] is not None else Xi)
+                
+                leader_k = best_pos[k] if best_pos[k] is not None else Xi
+                leader_j = best_pos[j] if best_pos[j] is not None else X_j
+                
+                # Method 1 (20%) or Method 2 (80%)
+                if rand2 < 0.2:
+                    # ===== METHOD 1: Add distance term (Eq. 11-13) =====
                     if p < 0.5:
-                        if abs(A) < 1:
-                            D = abs(C * leader - pop[i])
-                            new_pos = leader - A * D
-                        else:
-                            X_rand = pop[rng.integers(pop_size)]
-                            D = abs(C * X_rand - pop[i])
-                            new_pos = X_rand - A * D
-                    else:
-                        b = 2.5
-                        l = rng.uniform(-1, 1)
-                        distance = abs(leader - pop[i])
-                        new_pos = distance * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
-            else:  # Intra-task: traditional WOA (Algorithm 3, Step 22)
-                # ===== INTRA-TASK WOA OPERATIONS =====
-                leader = best_pos[sf]
-                r1 = rng.random()
-                r2 = rng.random()
-                A = 2 * a * r1 - a
-                C = 2 * r2
-                p = rng.random()
-                if p < 0.5:
-                    if abs(A) < 1:
-                        D = abs(C * leader - pop[i])
-                        new_pos = leader - A * D
-                    else:
-                        X_rand = pop[rng.integers(pop_size)]
-                        D = abs(C * X_rand - pop[i])
-                        new_pos = X_rand - A * D
+                        if abs(A) < 1.0:  # Encircling prey
+                            D1 = np.abs(C * leader_k - Xi)
+                            D_other = np.abs(C * leader_j - X_j)
+                            D_avg = (D1 + D_other) / 2.0
+                            new_pos = leader_k - A * D_avg
+                        else:  # Search for prey
+                            idx_k = np.where(skill_factors == k)[0]
+                            X_rand_k = pop[int(rng.choice(idx_k))] if len(idx_k) > 0 else Xi
+                            D2 = np.abs(C * X_rand_k - Xi)
+                            D_other = np.abs(C * leader_j - X_j)
+                            D_avg = (D2 + D_other) / 2.0
+                            new_pos = X_rand_k - A * D_avg
+                    else:  # Bubble-net attack
+                        D_prime = np.abs(leader_k - Xi)
+                        D_other = np.abs(leader_j - X_j)
+                        D_avg = (D_prime + D_other) / 2.0
+                        new_pos = D_avg * np.exp(b * l) * np.cos(2 * np.pi * l) + leader_k
+                
                 else:
-                    b = 2.5
-                    l = rng.uniform(-1, 1)
-                    distance = abs(leader - pop[i])
-                    new_pos = distance * np.exp(b * l) * np.cos(2 * np.pi * l) + leader
+                    # ===== METHOD 2: Crossover + Mutation (lines 14-19) =====
+                    idx_k = np.where(skill_factors == k)[0]
+                    X_rand_k = pop[int(rng.choice(idx_k))].copy() if len(idx_k) > 0 else Xi.copy()
+                    
+                    # Crossover
+                    X_rand_k, _ = sbx_crossover(X_rand_k, X_j, rng, pc=pc)
+                    leader_k_new, _ = sbx_crossover(leader_k.copy(), leader_j.copy(), rng, pc=pc)
+                    
+                    # Mutation (paper uses 0.1, not 0.2)
+                    if rand3 < 0.1:
+                        X_rand_k = gaussian_mutation(X_rand_k, rng, pm=pm)
+                        leader_k_new = gaussian_mutation(leader_k_new, rng, pm=pm)
+                        mutation_count += 1
+                    
+                    # Use new leaders in WOA update
+                    if p < 0.5:
+                        if abs(A) < 1.0:
+                            D1 = np.abs(C * leader_k_new - Xi)
+                            new_pos = leader_k_new - A * D1
+                        else:
+                            D2 = np.abs(C * X_rand_k - Xi)
+                            new_pos = X_rand_k - A * D2
+                    else:
+                        dist = np.abs(leader_k_new - Xi)
+                        new_pos = dist * np.exp(b * l) * np.cos(2 * np.pi * l) + leader_k_new
+                
+                # Horizontal cultural transmission (line 20-21, paper uses 0.5)
+                if rand4 < 0.5:
+                    new_skill = j
             
-            # =====  LAZY CONSTRAINT ENFORCEMENT =====
-            # Only clip to range [1, 254], NO ROUNDING during search
-            # Rounding happens only in continuous_to_thresholds (when evaluating fitness)
-            new_pos = np.clip(new_pos, 1.0, 254.0)  # ← Keep CONTINUOUS
+            else:
+                # ===== INNER-TASK: Traditional WOA =====
+                leader_k = best_pos[k] if best_pos[k] is not None else Xi
+                
+                if p < 0.5:
+                    if abs(A) < 1.0:  # Encircling prey
+                        D = np.abs(C * leader_k - Xi)
+                        new_pos = leader_k - A * D
+                    else:  # Search for prey
+                        idx_k = np.where(skill_factors == k)[0]
+                        X_rand = pop[int(rng.choice(idx_k))] if len(idx_k) > 0 else pop[rng.integers(pop_size)]
+                        D = np.abs(C * X_rand - Xi)
+                        new_pos = X_rand - A * D
+                else:  # Bubble-net attack
+                    dist = np.abs(leader_k - Xi)
+                    new_pos = dist * np.exp(b * l) * np.cos(2 * np.pi * l) + leader_k
+
+            # Clip to bounds
+            new_pos = np.clip(new_pos, 1.0, 254.0)
             
-            # =====  MUTATION OPERATOR =====
-            if enable_mutation and rng.random() < mutation_rate:
-                # Mutate 1-2 dimensions randomly to maintain diversity
-                n_mutate = rng.integers(1, min(3, maxK + 1))
-                mut_dims = rng.choice(maxK, n_mutate, replace=False)
-                for d in mut_dims:
-                    new_pos[d] = rng.uniform(1.0, 254.0)
-                mutation_count += 1
-            
-            # ===== EVALUATE NEW POSITION =====
-            new_fit = objectives[sf](new_pos)  # ← Constraints enforced INSIDE objective
+            # Evaluate new position
+            cost_new = objectives[new_skill](new_pos)
             nfe += 1
             
-            # ===== WOA PURE STRATEGY: Mandatory move based on |A| value =====
-            # Theo lý thuyết WOA gốc:
-            # - Search for prey (|A| ≥ 1): Cá thể di chuyển bắt buộc (exploration)
-            # - Encircle/Attack (|A| < 1): Cải thiện tham lam (exploitation)
-            should_update = False
+            # ===== ACCEPTANCE STRATEGY =====
+            accept = False
+            if greedy_selection:
+                if cost_new < fitness[i] - EPS:
+                    accept = True
+                    iter_improvements += 1
+            else:
+                # Balanced acceptance
+                if cost_new < fitness[i] - EPS:
+                    accept = True
+                    iter_improvements += 1
+                elif cost_new < fitness[i] * (1 + acceptance_threshold):
+                    prob = 0.3 * (1 - g / iters)
+                    if rng.random() < prob:
+                        accept = True
             
-            if abs(A_main) >= 1:  # Search for prey phase -> mandatory update
-                should_update = True
-            elif new_fit < fitness[i]:  # Encircle/attack -> greedy
-                should_update = True
-            
-            if should_update:
-                next_pop[i] = new_pos
-                fitness[i] = new_fit
-                if new_fit < best_score[sf]:  # Update global best if improved
-                    best_score[sf] = float(new_fit)
-                    best_pos[sf] = new_pos.copy()
+            if accept:
+                pop[i] = new_pos
+                skill_factors[i] = new_skill
+                fitness[i] = cost_new
+                factorial_costs[i, new_skill] = cost_new
 
-        # ===== APPLY ELITISM =====
-        # preserve best-N individuals per task into next_pop
-        if elitism and elitism > 0:
-            for t in range(T):
-                mask = (skill_factors == t)
-                if np.count_nonzero(mask) == 0:
-                    continue
-                # select indices of mask sorted by fitness ascending (best = lowest for minimization)
-                idxs = np.where(mask)[0]
-                # if fewer individuals than elitism, preserve all
-                if idxs.size <= elitism:
-                    continue
-                sorted_idxs = idxs[np.argsort(fitness[idxs])]  # ⚠️ CHANGED: ascending order for minimization
-                elite_idxs = sorted_idxs[:elitism]
-                # copy elites into their positions in next_pop
-                for ei in elite_idxs:
-                    next_pop[ei] = pop[ei].copy()
-                    # keep fitness consistent for elites
-                    fitness[ei] = float(fitness[ei])
-        
-        # finalize population for next generation
-        pop = next_pop
-        
-        # ===== END OF ITERATION: Update best_score_prev for next RMP check =====
-        best_score_prev = best_score.copy()
-        
-        # ===== ENHANCED LOGGING =====
-        if g % 10 == 0 and g > 0:
-            x_best_str = ", ".join([f"K{Ks[t]}:FE={-best_score[t]:.4f}" for t in range(T)])
-            print(f"      [Iter {g:3d}] X-best: {x_best_str}, RMP={rmp:.3f}, nfe={nfe}, mutations={mutation_count}")
-        
-        # log best per-task for history
+        # Update ranks
+        factorial_ranks = update_factorial_ranks(factorial_costs, T)
+
+        # Update best
+        for t in range(T):
+            valid_mask = factorial_costs[:, t] < np.inf
+            if np.any(valid_mask):
+                valid_costs = factorial_costs[valid_mask, t]
+                best_idx = np.where(valid_mask)[0][int(np.argmin(valid_costs))]
+                best_val = float(factorial_costs[best_idx, t])
+                
+                if best_val < best_score[t] - EPS:
+                    best_score[t] = best_val
+                    best_pos[t] = pop[best_idx].copy()
+
         for t in range(T):
             history[t].append(best_score[t])
+        
+        improvements_per_iter.append(iter_improvements)
+
+    # Final results
+    best_thresholds = []
+    best_FEs = []
+    for t in range(T):
+        if best_pos[t] is None:
+            best_thresholds.append([])
+            best_FEs.append(float("nan"))
+        else:
+            thr = continuous_to_thresholds(best_pos[t], Ks[t])
+            fe = -float(best_score[t])
+            best_thresholds.append(thr)
+            best_FEs.append(fe)
     
-    # ===== FINALIZE BEST THRESHOLDS =====
-    best_thresholds = [continuous_to_thresholds(best_pos[t], Ks[t]) if best_pos[t] is not None else [] for t in range(T)]
-    
-    # ⚠️ IMPORTANT: Negate best_score back to positive FE for reporting
-    # (objectives return -FE for minimization, but we want to report positive FE values)
-    
-    # DEBUG: Report final stats
-    x_best_final = ", ".join([f"K{Ks[t]}:FE={-best_score[t]:.4f}" for t in range(T)])
-    print(f"  [MFWOA-MT DONE] Final X-best: {x_best_final}")
-    print(f"    cross_task_transfers={cross_task_count}/{nfe} ({100*cross_task_count/(nfe+1):.1f}%), rmp_final={rmp:.3f}")
-    print(f"    ✅ mutations={mutation_count}/{nfe} ({100*mutation_count/(nfe+1):.1f}%)")
-    
-    diagnostics = {'history': history, 'nfe': nfe, 'cross_task_count': cross_task_count, 'mutation_count': mutation_count}
-    return best_thresholds, [-float(s) for s in best_score], diagnostics
+    return best_thresholds, best_FEs, {
+        "history": history, 
+        "nfe": nfe,
+        "cross_task_count": cross_task_count,
+        "mutation_count": mutation_count,
+        "improvements_per_iter": improvements_per_iter,
+    }

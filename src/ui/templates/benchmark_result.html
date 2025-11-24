@@ -177,7 +177,12 @@
         const selectedKs = Array.from(document.querySelectorAll('#k-selector input:checked')).map(x => parseInt(x.value));
 
         console.log('[DEBUG JS] selectedMfwoa:', selectedMfwoa, 'selectedWoa:', selectedWoa, 'selectedPso:', selectedPso, 'selectedOtsu:', selectedOtsu, 'selectedKs:', selectedKs);
-
+        
+        // Lấy giá trị lớn nhất trong histogram. Nếu không có dữ liệu thì mặc định là 1000
+        let maxY = 1000; 
+        if (histData.histogram && histData.histogram.length > 0) {
+             maxY = Math.max(...histData.histogram);
+        }
         const traces = [];
         const histBins = Array.from({length: 256}, (_, i) => i);
         
@@ -207,7 +212,7 @@
               thrs.forEach((thr, idx) => {
                 traces.push({
                   x: [thr, thr],
-                  y: [0, 650],
+                  y: [0, maxY],
                   mode: 'lines',
                   name: `MFWOA K=${k} T[${idx}]`,
                   line: { color: '#27ae60', width: 2, dash: 'solid' },
@@ -229,7 +234,7 @@
               thrs.forEach((thr, idx) => {
                 traces.push({
                   x: [thr, thr],
-                  y: [0, 650],
+                  y: [0, maxY],
                   mode: 'lines',
                   name: `WOA K=${k} T[${idx}]`,
                   line: { color: '#3498db', width: 2, dash: 'dash' },
@@ -252,7 +257,7 @@
               thrs.forEach((thr, idx) => {
                 traces.push({
                   x: [thr, thr],
-                  y: [0, 650],
+                  y: [0, maxY],
                   mode: 'lines',
                   name: `PSO K=${k} T[${idx}]`,
                   line: { color: '#e74c3c', width: 2, dash: 'dot' },
@@ -275,7 +280,7 @@
               thrs.forEach((thr, idx) => {
                 traces.push({
                   x: [thr, thr],
-                  y: [0, 650],
+                  y: [0, maxY],
                   mode: 'lines',
                   name: `Otsu K=${k} T[${idx}]`,
                   line: { color: '#f39c12', width: 2, dash: 'dashdot' },
